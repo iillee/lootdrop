@@ -1,0 +1,32 @@
+{
+  "ecs7": true,
+  "runtimeVersion": "7",
+  "display": {
+    "title": "LootDrop",
+    "description": "Drop items. Find items. Keep items.\n\nA prototype for persistent, spatial item drops in Decentraland.",
+    "favicon": ""
+  },
+  "main": "bin/index.js",
+  "tags": ["game", "prototype"],
+  "scene": {
+    "base": "0,0",
+    "parcels": ["0,0", "1,0", "0,1", "1,1"]
+  },
+  "spawnPoints": [
+    {
+      "name": "Entrance",
+      "default": true,
+      "position": { "x": 2, "y": 0, "z": 2 },
+      "cameraTarget": { "x": 16, "y": 1, "z": 16 }
+    }
+  ],
+  "requiredPermissions": [],
+  "featureToggles": {
+    "voiceChat": "enabled"
+  },
+  "source": {
+    "origin": "creator-hub",
+    "projectId": "lootdrop-prototype-001"
+  },
+  "opendcl": true
+}
