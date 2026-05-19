@@ -4,10 +4,14 @@ import {
   TextShape,
   GltfContainer,
   ColliderLayer,
-  Entity
+  Entity,
+  pointerEventsSystem,
+  InputAction
 } from '@dcl/sdk/ecs'
 import { Vector3, Quaternion, Color4 } from '@dcl/sdk/math'
+import { isStateSyncronized } from '@dcl/sdk/network'
 import { Rarity, RARITY_MODELS } from '../shared/items'
+import { room } from '../shared/messages'
 
 // ── Rarity visual config ──
 
@@ -21,6 +25,7 @@ const RARITY_TEXT_COLOR: Record<Rarity, Color4> = {
 
 interface RenderedItem {
   entity: Entity
+  label: Entity
   baseY: number
   offset: number
 }
@@ -58,8 +63,25 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
     width: 0.8
   })
 
+  // Pointer event — pick up on E press
+  pointerEventsSystem.onPointerDown(
+    {
+      entity,
+      opts: {
+        button: InputAction.IA_PRIMARY,
+        hoverText: 'Pick up ' + name,
+        maxDistance: 4
+      }
+    },
+    () => {
+      if (!isStateSyncronized()) return
+      room.send('requestPickup', { itemId: id })
+    }
+  )
+
   renderedItems.set(id, {
     entity,
+    label: labelFront,
     baseY: y,
     offset: itemCount++ * 1.5
   })
@@ -68,6 +90,8 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
 export function removeItemCard(id: string): void {
   const item = renderedItems.get(id)
   if (!item) return
+  pointerEventsSystem.removeOnPointerDown(item.entity)
+  engine.removeEntity(item.label)
   engine.removeEntity(item.entity)
   renderedItems.delete(id)
 }

@@ -1,7 +1,8 @@
 import { engine } from '@dcl/sdk/ecs'
 import { room } from '../shared/messages'
 import { Rarity, DroppedItem } from '../shared/items'
-import { spawnItemCard, clearAllItems, itemAnimationSystem } from './itemRenderer'
+import { spawnItemCard, removeItemCard, clearAllItems, itemAnimationSystem } from './itemRenderer'
+import { showPickupNotification } from './ui'
 
 export function setupClient(): void {
   console.log('[Client] Setting up LootDrop client...')
@@ -10,6 +11,13 @@ export function setupClient(): void {
   room.onMessage('itemDropped', (data) => {
     console.log('[Client] Item dropped:', data.name)
     spawnItemCard(data.id, data.name, data.rarity as Rarity, data.x, data.y, data.z)
+  })
+
+  // Handle item picked up
+  room.onMessage('itemPickedUp', (data) => {
+    console.log('[Client] Item picked up:', data.itemName, 'by', data.pickerName)
+    removeItemCard(data.id)
+    showPickupNotification(data.pickerName, data.itemName, data.rarity as Rarity)
   })
 
   // Handle full sync (on connect)

@@ -4,6 +4,7 @@ import { registerMessages } from '@dcl/sdk/network'
 export const Messages = {
   // Client → Server
   requestDrop: Schemas.Map({ t: Schemas.Int }),
+  requestPickup: Schemas.Map({ itemId: Schemas.String }),
 
   // Server → Client
   itemDropped: Schemas.Map({
@@ -14,6 +15,13 @@ export const Messages = {
     y: Schemas.Float,
     z: Schemas.Float,
     dropperId: Schemas.String
+  }),
+  itemPickedUp: Schemas.Map({
+    id: Schemas.String,
+    pickerId: Schemas.String,
+    pickerName: Schemas.String,
+    itemName: Schemas.String,
+    rarity: Schemas.String
   }),
   syncAll: Schemas.Map({ itemsJson: Schemas.String }),
   error: Schemas.Map({ message: Schemas.String })

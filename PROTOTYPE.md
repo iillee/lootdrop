@@ -125,24 +125,40 @@ This is the minimum viable magic. If this feels good, everything else follows.
 
 ---
 
-### Step 3 — Mock Item Pickup
-- Player walks near an item → pointer event appears ("Press E to pick up")
-- Client sends "pickup" message → server validates (proximity check) → removes item → broadcasts
-- Visual feedback: item flies to player, sparkle effect, confirmation text
-- Server updates persistent state
+### Step 3 — Mock Item Pickup ✅ COMPLETE
+- Player walks near an item → pointer event appears ("Press E to pick up [item name]")
+- Client sends `requestPickup` with item ID → server validates (proximity check) → removes item → broadcasts
+- Server-side proximity check at 3m (horizontal distance, ignores Y)
+- Client pointer event `maxDistance: 4` (slightly generous to avoid frustrating near-misses)
+- Pickup notification banner at top-center for 3s, rarity-colored text
+- Server removes item from state array, persists, broadcasts `itemPickedUp` to all clients
+- Client removes entity + label + pointer event on pickup
+- FIFO for simultaneous pickups: first valid request wins, others get "Item no longer exists"
+
+**Notes from build:**
+- Went with server-side proximity using `PlayerIdentityData` + `Transform` (option 2
+  from original concerns). The server already reads player positions for drops, so
+  reusing the same pattern for pickup was trivial. No client-reported positions needed.
+- Extracted `getPlayerPosition()` and `horizontalDistance()` helpers in server.ts —
+  both drop and pickup logic use them now.
+- Added `safe()` wrapper on server systems (from flagtag pattern) for crash resilience.
+- Instant pickup + text notification. No fly animation yet (Step 6 polish).
+- `showPickupNotification()` exported from ui.tsx and called by setup.ts on
+  `itemPickedUp` message — keeps UI state simple (module-level variables, no React state).
 
 **Concerns:**
-- Proximity check should happen SERVER-SIDE to prevent cheating. But the server
-  doesn't know player positions by default. Options:
-  1. Client sends its position with the pickup request, server trusts it (fine for prototype)
-  2. Server tracks player positions via a polling system (more robust, more complex)
-  → Go with option 1 for prototype, note option 2 for production.
-- Pointer events (hover text) have a max interaction distance (~10m default).
-  Should set `maxDistance` to ~3m so you have to be close.
-- "Item flies to player" animation: Tween component can handle this, but the item
-  entity gets destroyed right after. Need to either: tween first → delay → destroy,
-  or skip the fly animation for now and just do instant pickup with text feedback.
-  → Start with instant pickup + text popup. Add fly animation in Step 6 polish.
+- Notification text uses `from.slice(0, 8)` as player name (wallet prefix). No name
+  resolution yet — would need a `registerName` message like flagtag has. Low priority
+  for prototype but looks ugly with hex addresses.
+- No sound on pickup. The moment feels flat — just text appearing. Adding a pickup
+  sound in Step 6 would help a lot.
+- Pointer event hover text rotates with the card (bob+spin animation). This means
+  the hover hitbox is a spinning target. In practice it's fine because the collider
+  is generous, but could feel odd. If it becomes a problem, could parent the collider
+  to a non-rotating wrapper entity.
+- `clearAllItems()` in the syncAll handler calls `removeItemCard()` per item, which
+  calls `pointerEventsSystem.removeOnPointerDown()` per entity. If syncAll fires with
+  many items, this is a burst of removes + adds. Fine for 30 items, but worth noting.
 
 ---
 
