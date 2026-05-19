@@ -20,6 +20,7 @@
       "cameraTarget": { "x": 16, "y": 1, "z": 16 }
     }
   ],
+  "authoritativeMultiplayer": true,
   "requiredPermissions": [],
   "featureToggles": {
     "voiceChat": "enabled"
@@ -27,6 +28,9 @@
   "source": {
     "origin": "creator-hub",
     "projectId": "lootdrop-prototype-001"
+  },
+  "worldConfiguration": {
+    "name": "lootdrop.dcl.eth"
   },
   "opendcl": true
 }
