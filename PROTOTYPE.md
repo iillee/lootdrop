@@ -83,27 +83,45 @@ This is the minimum viable magic. If this feels good, everything else follows.
 
 ---
 
-### Step 2 — Mock Item Drop System (NEXT)
-- Enable authoritative server mode in scene.json (`authoritativeMultiplayer: true`)
-- Define item data structure on server:
-  ```
-  { id, name, rarity, position: {x,y,z}, dropperId, timestamp }
-  ```
-- Server stores dropped items in memory + persists via Storage API
-- Client sends "drop" message with position → server validates → broadcasts
-- All clients spawn the glowing item entity at that position
-- For mock phase: drop UI is a simple button that spawns a random item at player's feet
+### Step 2 — Mock Item Drop System ✅ COMPLETE
+- Installed `@dcl/sdk@auth-server` (required for isServer, registerMessages, Storage)
+- Enabled `authoritativeMultiplayer: true` in scene.json
+- Split codebase into `shared/`, `server/`, `client/` structure
+- Shared: message schemas (requestDrop, itemDropped, syncAll, error) + item types
+- Server: validates drops, reads player position via PlayerIdentityData, persists
+  items to Storage, broadcasts to all clients, syncs on player connect
+- Client: message handlers spawn/remove card entities, bob+spin animation system
+- UI: "DROP ITEM" button (bottom-right) with 2s cooldown, sends requestDrop
+- Item data: `{ id, name, rarity, x, y, z, dropperId, timestamp }`
+- 30 item cap enforced server-side
+- Stripped Step 1 environment (floor, pillars, drop zone, sign) — cards only now
+
+**Notes from build:**
+- Used flagtag project as reference for auth server patterns — same SDK branch,
+  same registerMessages/isServer/Storage APIs
+- Server reads real player position via `PlayerIdentityData` + `Transform` — no
+  client-reported positions, anti-cheat by default
+- Storage API is flat (`Storage.get`/`Storage.set`), not `Storage.world.get` as
+  the skill docs suggested — verified against flagtag's persistence.ts
+- Each item = 2 entities (card + front label). Reduced from 4 in Step 1 (removed
+  glow sphere and back label). At 2 entities/item, 30 item cap = 60 entities.
+- Static import of `./shared/messages` in index.ts is critical — schemas must
+  register before the engine seals. Dynamic import would break registerMessages.
+- CRDT files (main.crdt) must be deleted when switching to auth-server mode,
+  otherwise you get "Outside of bounds" errors.
 
 **Concerns:**
-- Need to research `registerMessages()` and `isServer()` patterns from SDK7
-  authoritative server docs before building. Haven't used this API yet in this project.
-- Player position: we need to read the local player's Transform to know WHERE
-  to drop. SDK7 provides this via `Transform.get(engine.PlayerEntity)`.
-- Entity cleanup: when a client disconnects and reconnects, the server needs to
-  re-sync all existing items. SYNC_ALL message on connect.
-- Entity limits: each dropped item = ~4 entities (card + glow + label + rarity tag).
-  With a 2x2 scene (~2048 entity budget), we can safely handle ~50 items max before
-  needing to optimize. Should cap at 30 to leave room for environment + UI.
+- The scene is empty until you drop something — no environment, no instructions.
+  New visitors won't know what to do. Need at minimum a welcome sign or floor
+  before Step 3. Could also add back a simple ground plane.
+- DROP ITEM button visibility: haven't confirmed it renders in Creator Hub preview
+  yet. React-ECS UI can sometimes not appear if the auth server connection isn't
+  fully established (isStateSyncronized check gates the send, but UI renders always).
+- No visual/audio feedback on drop — item just silently appears. Step 6 polish
+  should add a drop sound + brief glow burst.
+- Player sync system uses a Set to track known players, but never removes them.
+  If a player disconnects and reconnects, they won't get a fresh syncAll. Fine
+  for prototype since items don't change while offline, but worth noting.
 
 ---
 
