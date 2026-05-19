@@ -140,13 +140,23 @@ const InventoryPanel = () => {
           }}
           uiBackground={{ color: Color4.create(0.14, 0.14, 0.2, 1) }}
         >
-          {/* Rarity dot */}
-          <UiEntity
-            uiTransform={{ width: 8, height: 8, margin: { right: 8 } }}
-            uiBackground={{ color: rarityColor(w.rarity) }}
-          />
+          {/* Thumbnail or rarity dot */}
+          {w.thumbnail ? (
+            <UiEntity
+              uiTransform={{ width: 36, height: 36, margin: { right: 8 }, flexShrink: 0 }}
+              uiBackground={{
+                textureMode: 'stretch',
+                texture: { src: w.thumbnail }
+              }}
+            />
+          ) : (
+            <UiEntity
+              uiTransform={{ width: 8, height: 8, margin: { right: 8 }, flexShrink: 0 }}
+              uiBackground={{ color: rarityColor(w.rarity) }}
+            />
+          )}
           {/* Name + rarity label */}
-          <UiEntity uiTransform={{ flexDirection: 'column', width: 170 }}>
+          <UiEntity uiTransform={{ flexDirection: 'column', width: 150 }}>
             <Label
               value={w.name.length > 22 ? w.name.slice(0, 20) + '…' : w.name}
               fontSize={12}

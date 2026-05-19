@@ -59,7 +59,7 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
     parent: entity
   })
   TextShape.create(labelFront, {
-    text: name,
+    text: name + '\n' + rarity.toUpperCase(),
     fontSize: 1.2,
     textColor: RARITY_TEXT_COLOR[rarity] || RARITY_TEXT_COLOR.common,
     outlineColor: Color4.create(0, 0, 0, 1),
