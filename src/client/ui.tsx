@@ -4,6 +4,7 @@ import { isStateSyncronized } from '@dcl/sdk/network'
 import { room } from '../shared/messages'
 import { Rarity, OwnedWearable } from '../shared/items'
 import { getWearables, isLoading, isLoaded, fetchWearables } from './inventory'
+import { parseWearableUrn, executeDeposit, TxStatus } from './blockchain'
 
 // ── Rarity colors ──
 
@@ -19,6 +20,44 @@ const RARITY_COLORS: Record<string, Color4> = {
 
 function rarityColor(r: string): Color4 {
   return RARITY_COLORS[r] || RARITY_COLORS.common
+}
+
+// ── Transaction status state ──
+
+let txStatusText = ''
+let txStatusColor = Color4.White()
+let txStatusUntil = 0
+
+const TX_STATUS_MESSAGES: Record<string, string> = {
+  'idle': '',
+  'switching-chain': '⛓️ Switching to Polygon...',
+  'approving': '✍️ Approve the transaction in your wallet...',
+  'depositing': '📦 Depositing into escrow...',
+  'claiming': '🎁 Claiming from escrow...',
+  'confirmed': '✅ Transaction confirmed!',
+  'error': '❌ Transaction failed'
+}
+
+export function showTxStatus(status: TxStatus | string, error?: string): void {
+  if (status === 'idle') {
+    txStatusUntil = 0
+    return
+  }
+  if (status === 'confirmed') {
+    txStatusText = TX_STATUS_MESSAGES['confirmed']
+    txStatusColor = Color4.create(0.3, 1, 0.3, 1)
+    txStatusUntil = Date.now() + 3000
+    return
+  }
+  if (status === 'error') {
+    txStatusText = TX_STATUS_MESSAGES['error'] + (error ? ': ' + error.slice(0, 60) : '')
+    txStatusColor = Color4.create(1, 0.3, 0.3, 1)
+    txStatusUntil = Date.now() + 5000
+    return
+  }
+  txStatusText = TX_STATUS_MESSAGES[status] || status
+  txStatusColor = Color4.create(1, 0.85, 0.3, 1)
+  txStatusUntil = Date.now() + 30000 // keep showing until replaced
 }
 
 // ── Inventory panel state ──
@@ -42,8 +81,39 @@ function handleDropItem(w: OwnedWearable): void {
   const now = Date.now()
   if (now - lastDropTime < DROP_COOLDOWN_MS) return
   lastDropTime = now
-  room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
   showInventory = false
+
+  // Check if this is a Polygon wearable we can transfer on-chain
+  const parsed = parseWearableUrn(w.urn)
+
+  if (parsed && parsed.chain === 'matic') {
+    // On-chain drop: approve → deposit → confirm to server
+    showTxStatus('approving')
+    executeDeposit(
+      parsed.collection,
+      parsed.itemId,
+      (onChainDropId) => {
+        // Deposit succeeded — tell server to place the item
+        showTxStatus('confirmed')
+        room.send('confirmDrop', {
+          name: w.name,
+          rarity: w.rarity,
+          urn: w.urn,
+          onChainDropId,
+          collection: parsed.collection,
+          tokenId: '' // server doesn't need this for now
+        })
+        setTimeout(() => showTxStatus('idle'), 3000)
+      },
+      (error) => {
+        showTxStatus('error', error)
+        setTimeout(() => showTxStatus('idle'), 5000)
+      }
+    )
+  } else {
+    // Mock drop (Ethereum L1 wearables or no URN — use old flow)
+    room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
+  }
 }
 
 // ── Pickup notification state ──
@@ -127,59 +197,62 @@ const InventoryPanel = () => {
       )}
 
       {/* Item list */}
-      {pageItems.map((w, i) => (
-        <UiEntity
-          key={`inv-${scrollOffset + i}`}
-          uiTransform={{
-            width: 264,
-            height: 42,
-            flexDirection: 'row',
-            alignItems: 'center',
-            margin: { top: 2, left: 8, right: 8 },
-            padding: { left: 8, right: 4 }
-          }}
-          uiBackground={{ color: Color4.create(0.14, 0.14, 0.2, 1) }}
-        >
-          {/* Thumbnail or rarity dot */}
-          {w.thumbnail ? (
-            <UiEntity
-              uiTransform={{ width: 36, height: 36, margin: { right: 8 }, flexShrink: 0 }}
-              uiBackground={{
-                textureMode: 'stretch',
-                texture: { src: w.thumbnail }
-              }}
-            />
-          ) : (
-            <UiEntity
-              uiTransform={{ width: 8, height: 8, margin: { right: 8 }, flexShrink: 0 }}
-              uiBackground={{ color: rarityColor(w.rarity) }}
-            />
-          )}
-          {/* Name + rarity label */}
-          <UiEntity uiTransform={{ flexDirection: 'column', width: 150 }}>
-            <Label
-              value={w.name.length > 22 ? w.name.slice(0, 20) + '…' : w.name}
-              fontSize={12}
-              color={Color4.White()}
-              uiTransform={{ width: 170, height: 20 }}
-            />
-            <Label
-              value={w.rarity.toUpperCase()}
-              fontSize={9}
-              color={rarityColor(w.rarity)}
-              uiTransform={{ width: 170, height: 14 }}
+      {pageItems.map((w, i) => {
+        const isPolygon = !!parseWearableUrn(w.urn)
+        return (
+          <UiEntity
+            key={`inv-${scrollOffset + i}`}
+            uiTransform={{
+              width: 264,
+              height: 42,
+              flexDirection: 'row',
+              alignItems: 'center',
+              margin: { top: 2, left: 8, right: 8 },
+              padding: { left: 8, right: 4 }
+            }}
+            uiBackground={{ color: Color4.create(0.14, 0.14, 0.2, 1) }}
+          >
+            {/* Thumbnail or rarity dot */}
+            {w.thumbnail ? (
+              <UiEntity
+                uiTransform={{ width: 36, height: 36, margin: { right: 8 }, flexShrink: 0 }}
+                uiBackground={{
+                  textureMode: 'stretch',
+                  texture: { src: w.thumbnail }
+                }}
+              />
+            ) : (
+              <UiEntity
+                uiTransform={{ width: 8, height: 8, margin: { right: 8 }, flexShrink: 0 }}
+                uiBackground={{ color: rarityColor(w.rarity) }}
+              />
+            )}
+            {/* Name + rarity + chain label */}
+            <UiEntity uiTransform={{ flexDirection: 'column', width: 150 }}>
+              <Label
+                value={w.name.length > 22 ? w.name.slice(0, 20) + '…' : w.name}
+                fontSize={12}
+                color={Color4.White()}
+                uiTransform={{ width: 150, height: 20 }}
+              />
+              <Label
+                value={w.rarity.toUpperCase() + (isPolygon ? ' ⛓️' : ' (L1)')}
+                fontSize={9}
+                color={rarityColor(w.rarity)}
+                uiTransform={{ width: 150, height: 14 }}
+              />
+            </UiEntity>
+            {/* Drop button */}
+            <Button
+              value={isPolygon ? 'DROP ⛓️' : 'DROP'}
+              variant="primary"
+              fontSize={11}
+              uiTransform={{ width: 56, height: 30 }}
+              onMouseDown={() => handleDropItem(w)}
             />
           </UiEntity>
-          {/* Drop button */}
-          <Button
-            value="DROP"
-            variant="primary"
-            fontSize={11}
-            uiTransform={{ width: 56, height: 30 }}
-            onMouseDown={() => handleDropItem(w)}
-          />
-        </UiEntity>
-      ))}
+        )
+      })}
 
       {/* Pagination */}
       {(hasPrev || hasMore) && (
@@ -227,6 +300,7 @@ const InventoryPanel = () => {
 
 const LootDropUI = () => {
   const showNotification = Date.now() < notificationUntil
+  const showTx = Date.now() < txStatusUntil
 
   return (
     <UiEntity uiTransform={{ width: '100%', height: '100%', positionType: 'absolute' }}>
@@ -249,6 +323,31 @@ const LootDropUI = () => {
 
       {/* Inventory panel */}
       {showInventory && <InventoryPanel />}
+
+      {/* Transaction status — center of screen */}
+      {showTx && (
+        <UiEntity uiTransform={{
+          positionType: 'absolute',
+          position: { top: '40%' },
+          width: '100%',
+          height: 50,
+          justifyContent: 'center',
+          alignItems: 'center'
+        }}>
+          <UiEntity
+            uiTransform={{ padding: { top: 8, bottom: 8, left: 16, right: 16 } }}
+            uiBackground={{ color: Color4.create(0.05, 0.05, 0.1, 0.9) }}
+          >
+            <Label
+              value={txStatusText}
+              fontSize={18}
+              color={txStatusColor}
+              textAlign="middle-center"
+              uiTransform={{ width: 500, height: 30 }}
+            />
+          </UiEntity>
+        </UiEntity>
+      )}
 
       {/* Pickup notification — top center */}
       {showNotification && (

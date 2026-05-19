@@ -15,7 +15,8 @@
     "@dcl/sdk": "^7.23.2-25521226778.commit-1828100"
   },
   "dependencies": {
-    "@dcl/js-runtime": "7.23.2-25521226778.commit-1828100"
+    "@dcl/js-runtime": "7.23.2-25521226778.commit-1828100",
+    "eth-connect": "^6.2.4"
   },
   "engines": {
     "node": ">=16.0.0",

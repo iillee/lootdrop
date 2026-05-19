@@ -32,6 +32,7 @@ interface RenderedItem {
   label: Entity
   baseY: number
   offset: number
+  onChainDropId: string
 }
 
 const renderedItems = new Map<string, RenderedItem>()
@@ -39,7 +40,7 @@ let itemCount = 0
 
 // ── Public API ──
 
-export function spawnItemCard(id: string, name: string, rarity: Rarity, x: number, y: number, z: number): void {
+export function spawnItemCard(id: string, name: string, rarity: Rarity, x: number, y: number, z: number, onChainDropId: string = ''): void {
   if (renderedItems.has(id)) return // already rendered
 
   const entity = engine.addEntity()
@@ -87,7 +88,8 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
     entity,
     label: labelFront,
     baseY: y,
-    offset: itemCount++ * 1.5
+    offset: itemCount++ * 1.5,
+    onChainDropId
   })
 }
 

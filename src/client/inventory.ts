@@ -75,7 +75,7 @@ export function fetchWearables(): void {
             body: JSON.stringify({ pointers: batch })
           })
           if (!metaRes.ok) {
-            console.warn('[Inventory] Metadata batch failed:', metaRes.status)
+            console.log('[Inventory] Metadata batch failed:', metaRes.status)
             continue
           }
           const entities: any[] = await metaRes.json()
@@ -100,7 +100,7 @@ export function fetchWearables(): void {
             }
           }
         } catch (batchErr) {
-          console.warn('[Inventory] Metadata batch error:', batchErr)
+          console.log('[Inventory] Metadata batch error:', batchErr)
         }
       }
 

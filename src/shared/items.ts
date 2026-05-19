@@ -8,7 +8,10 @@ export interface DroppedItem {
   id: string
   name: string
   rarity: Rarity
-  urn: string        // wearable URN (empty string for mock items)
+  urn: string              // wearable URN (empty string for mock items)
+  onChainDropId: string    // escrow contract dropId (empty for mock/non-chain drops)
+  collection: string       // ERC-721 contract address (empty for mock)
+  tokenId: string          // on-chain tokenId (empty for mock)
   x: number
   y: number
   z: number
