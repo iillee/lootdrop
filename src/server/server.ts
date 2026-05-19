@@ -1,7 +1,7 @@
 import { engine, PlayerIdentityData, Transform } from '@dcl/sdk/ecs'
 import { Storage } from '@dcl/sdk/server'
 import { room } from '../shared/messages'
-import { DroppedItem, MOCK_ITEMS, MAX_DROPPED_ITEMS } from '../shared/items'
+import { DroppedItem, Rarity, ALL_RARITIES, MAX_DROPPED_ITEMS } from '../shared/items'
 
 // ── Server State ──
 let droppedItems: DroppedItem[] = []
@@ -81,7 +81,7 @@ function horizontalDistance(a: { x: number; z: number }, b: { x: number; z: numb
 
 function registerHandlers(): void {
   // ── Drop ──
-  room.onMessage('requestDrop', (_data, context) => {
+  room.onMessage('requestDrop', (data, context) => {
     if (!context) return
     const from = context.from
 
@@ -90,16 +90,25 @@ function registerHandlers(): void {
       return
     }
 
+    // Validate incoming data
+    const name = (data.name || '').trim()
+    const rarity = ALL_RARITIES.includes(data.rarity as Rarity) ? data.rarity as Rarity : 'common'
+    const urn = (data.urn || '').trim()
+
+    if (!name || name.length > 100) {
+      room.send('error', { message: 'Invalid item name.' }, { to: [from] })
+      return
+    }
+
     const pos = getPlayerPosition(from)
     const px = pos ? pos.x : 16
     const pz = pos ? pos.z : 16
 
-    const mock = MOCK_ITEMS[Math.floor(Math.random() * MOCK_ITEMS.length)]
-
     const item: DroppedItem = {
       id: 'item-' + nextId++,
-      name: mock.name,
-      rarity: mock.rarity,
+      name,
+      rarity,
+      urn,
       x: px,
       y: 1.2,
       z: pz,

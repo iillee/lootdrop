@@ -162,6 +162,60 @@ This is the minimum viable magic. If this feels good, everything else follows.
 
 ---
 
+### Step 5a — Wallet Wearables in Drop UI (CODE COMPLETE, NOT YET TESTED)
+
+Code is written and compiles clean, but **scene won't load in preview**. Must debug
+auth server startup before this step can be verified.
+
+**What was built:**
+- `client/inventory.ts` — fetches player's real wearables from
+  `peer.decentraland.org/lambdas/collections/wearables-by-owner/{address}`.
+  Sorted rarest-first. Falls back to mock items for guests or fetch failures.
+- `shared/items.ts` — expanded Rarity to all 7 DCL rarities (common, uncommon,
+  rare, epic, legendary, mythic, unique). Added `OwnedWearable` type, `urn` field
+  on `DroppedItem`. Rarity model map falls back for missing GLBs.
+- `shared/messages.ts` — `requestDrop` now carries `{ name, rarity, urn }` from
+  client instead of `{ t: 0 }`.
+- `server/server.ts` — drop handler reads name/rarity/urn from message, validates
+  name length and rarity value. No longer picks random mocks.
+- `client/ui.tsx` — full inventory panel: toggle open/close, wearable list with
+  rarity dots + names + per-item DROP button, pagination (8/page), loading/empty
+  states, dark panel styling.
+- `client/itemRenderer.ts` — rarity text colors updated for all 7 rarities.
+
+---
+
+### 🚨 BLOCKING BUG — Auth Server Not Starting (Must Fix Next Session)
+
+**Symptom:** Scene loads blank — no UI, no entities, no errors in scene log except:
+```
+[ERROR] Engine is already sealed. No components can be added at this stage
+```
+
+**What we tried:**
+1. Deleted stale `main.crdt` / `main1.crdt` files — didn't help
+2. Clean rebuild (`rm -rf bin && npx tsc`) — compiles clean, still fails at runtime
+3. Moved `@dcl/js-runtime` from devDependencies to dependencies (matching flagtag) — didn't help
+4. Added `start:server` script to package.json (matching flagtag) — didn't help
+5. Verified SDK version matches flagtag exactly (`7.23.2-25521226778.commit-1828100`)
+6. Verified `init_messages()` runs before `main()` in compiled output (line 20764 vs 64866)
+7. Bundle structure looks correct — `registerMessages` is called at module init time
+
+**What to investigate next session:**
+- Compare the full compiled `bin/index.js` entry-point section with flagtag's
+- Check if Creator Hub preview vs Bevy preview makes a difference
+- Try running `npx @dcl/hammurabi-server@next` manually to see server-side errors
+- Try reverting to the Step 2 commit (before Step 3 + 5a changes) to see if that
+  version still works — isolate whether the bug is new or was always there
+- Check if the "Engine is already sealed" error is from the SERVER engine instance
+  (not the client) — the server bundle has its own engine copy
+- Look at whether `getPlayer` import in `inventory.ts` (from `@dcl/sdk/src/players`)
+  causes issues even though it's only dynamically imported on client side
+- Nuclear option: scaffold a fresh scene with `init`, copy code file by file from
+  flagtag's working structure, and see where it breaks
+
+---
+
 ### Step 4 — Persistence
 - Use SDK7 authoritative server Storage API to save/load dropped items
 - Items survive scene restarts and player disconnections

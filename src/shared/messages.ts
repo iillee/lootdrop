@@ -3,7 +3,11 @@ import { registerMessages } from '@dcl/sdk/network'
 
 export const Messages = {
   // Client → Server
-  requestDrop: Schemas.Map({ t: Schemas.Int }),
+  requestDrop: Schemas.Map({
+    name: Schemas.String,
+    rarity: Schemas.String,
+    urn: Schemas.String
+  }),
   requestPickup: Schemas.Map({ itemId: Schemas.String }),
 
   // Server → Client

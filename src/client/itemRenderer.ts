@@ -15,10 +15,14 @@ import { room } from '../shared/messages'
 
 // ── Rarity visual config ──
 
-const RARITY_TEXT_COLOR: Record<Rarity, Color4> = {
+const RARITY_TEXT_COLOR: Record<string, Color4> = {
   common: Color4.create(0.95, 0.95, 0.95, 1),
+  uncommon: Color4.create(0.95, 0.95, 0.95, 1),
   rare: Color4.create(1, 1, 1, 1),
+  epic: Color4.create(1, 1, 1, 1),
   legendary: Color4.create(1, 1, 1, 1),
+  mythic: Color4.create(1, 1, 1, 1),
+  unique: Color4.create(1, 1, 1, 1),
 }
 
 // ── Active item tracking ──

@@ -1,11 +1,14 @@
 /** Shared item types and rarity config used by both server and client. */
 
-export type Rarity = 'common' | 'rare' | 'legendary'
+export type Rarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary' | 'mythic' | 'unique'
+
+export const ALL_RARITIES: Rarity[] = ['common', 'uncommon', 'rare', 'epic', 'legendary', 'mythic', 'unique']
 
 export interface DroppedItem {
   id: string
   name: string
   rarity: Rarity
+  urn: string        // wearable URN (empty string for mock items)
   x: number
   y: number
   z: number
@@ -13,7 +16,16 @@ export interface DroppedItem {
   timestamp: number
 }
 
-/** Mock item pool — random items for the prototype drop button. */
+/** Wearable info as returned by the inventory fetch. */
+export interface OwnedWearable {
+  urn: string
+  name: string
+  rarity: Rarity
+  category: string
+  thumbnail: string
+}
+
+/** Mock item pool — used as fallback when wallet wearables can't be fetched. */
 export const MOCK_ITEMS: { name: string; rarity: Rarity }[] = [
   { name: 'Common Shoes', rarity: 'common' },
   { name: 'Common Cap', rarity: 'common' },
@@ -24,10 +36,15 @@ export const MOCK_ITEMS: { name: string; rarity: Rarity }[] = [
   { name: 'Legendary Sword', rarity: 'legendary' },
 ]
 
-export const RARITY_MODELS: Record<Rarity, string> = {
+/** Map rarity to card model. Falls back to common for missing rarities. */
+export const RARITY_MODELS: Record<string, string> = {
   common: 'models/rarity-bg-common.glb',
+  uncommon: 'models/rarity-bg-common.glb',   // TODO: download uncommon model
   rare: 'models/rarity-bg-rare.glb',
+  epic: 'models/rarity-bg-rare.glb',          // TODO: download epic model
   legendary: 'models/rarity-bg-legendary.glb',
+  mythic: 'models/rarity-bg-legendary.glb',   // TODO: download mythic model
+  unique: 'models/rarity-bg-legendary.glb',   // TODO: download unique model
 }
 
 export const MAX_DROPPED_ITEMS = 30
