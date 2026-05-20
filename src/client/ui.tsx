@@ -60,20 +60,108 @@ export function showTxStatus(status: TxStatus | string, error?: string): void {
   txStatusUntil = Date.now() + 30000 // keep showing until replaced
 }
 
-// ── Inventory panel state ──
+// ── Inventory state ──
+
+const HOTBAR_SLOTS = 10
+const GRID_COLS = 10
+const GRID_ROWS = 5
 
 let showInventory = false
-let scrollOffset = 0
-const ITEMS_PER_PAGE = 8
 let lastDropTime = 0
 const DROP_COOLDOWN_MS = 2000
+let gridScrollOffset = 0 // row offset for grid pagination
+
+// Unified selection: first click selects, second click places
+let selSource: 'hotbar' | 'grid' | null = null
+let selIndex = -1
+
+function clearSelection(): void {
+  selSource = null
+  selIndex = -1
+}
+
+// The hotbar: 10 slots that persist. null = empty slot.
+const hotbar: (OwnedWearable | null)[] = new Array(HOTBAR_SLOTS).fill(null)
+
+// The inventory grid: persistent slots, same as hotbar but larger.
+let inventory: (OwnedWearable | null)[] = []
+let slotsInitialized = false
+
+/** Auto-fill hotbar with first 10, inventory with the rest. */
+function ensureHotbarInit(): void {
+  if (slotsInitialized) return
+  const wearables = getWearables()
+  if (!isLoaded() || wearables.length === 0) return
+  slotsInitialized = true
+
+  // First 10 go to hotbar
+  for (let i = 0; i < HOTBAR_SLOTS && i < wearables.length; i++) {
+    hotbar[i] = wearables[i]
+  }
+
+  // Rest go to inventory grid
+  const remaining = wearables.slice(HOTBAR_SLOTS)
+  // Size inventory to at least fill one page, or enough to hold all items
+  const minSlots = Math.max(GRID_COLS * GRID_ROWS, remaining.length)
+  inventory = new Array(minSlots).fill(null)
+  for (let i = 0; i < remaining.length; i++) {
+    inventory[i] = remaining[i]
+  }
+}
+
+/** Get total number of inventory slots (grows in page increments). */
+function getInventorySize(): number {
+  const PAGE = GRID_COLS * GRID_ROWS
+  return Math.max(PAGE, Math.ceil(inventory.length / PAGE) * PAGE)
+}
+
+/** Perform a swap/move between any two slots. */
+function swapSlots(srcType: 'hotbar' | 'grid', srcIdx: number, dstType: 'hotbar' | 'grid', dstIdx: number): void {
+  const srcArr = srcType === 'hotbar' ? hotbar : inventory
+  const dstArr = dstType === 'hotbar' ? hotbar : inventory
+
+  // Ensure inventory array is large enough
+  if (dstType === 'grid' && dstIdx >= inventory.length) {
+    const newLen = dstIdx + 1
+    while (inventory.length < newLen) inventory.push(null)
+  }
+  if (srcType === 'grid' && srcIdx >= inventory.length) {
+    const newLen = srcIdx + 1
+    while (inventory.length < newLen) inventory.push(null)
+  }
+
+  const temp = dstArr[dstIdx]
+  dstArr[dstIdx] = srcArr[srcIdx]
+  srcArr[srcIdx] = temp
+}
+
+/** Handle clicking any slot (hotbar or grid) — unified two-click system. */
+function handleSlotClick(type: 'hotbar' | 'grid', idx: number): void {
+  // Clicking the already-selected slot → deselect
+  if (selSource === type && selIndex === idx) {
+    clearSelection()
+    return
+  }
+
+  // If something is already selected → perform swap/move
+  if (selSource !== null) {
+    swapSlots(selSource, selIndex, type, idx)
+    clearSelection()
+    return
+  }
+
+  // Nothing selected → select this slot (items or empty)
+  selSource = type
+  selIndex = idx
+}
 
 function toggleInventory(): void {
   showInventory = !showInventory
   if (showInventory && !isLoaded() && !isLoading()) {
     fetchWearables()
   }
-  scrollOffset = 0
+  gridScrollOffset = 0
+  clearSelection()
 }
 
 function handleDropItem(w: OwnedWearable): void {
@@ -129,171 +217,343 @@ export function showPickupNotification(pickerName: string, itemName: string, rar
   notificationUntil = Date.now() + NOTIFICATION_DURATION_MS
 }
 
-// ── UI Components ──
+// ── UI Constants ──
 
-const InventoryPanel = () => {
-  const wearables = getWearables()
-  const loading = isLoading()
-  const pageItems = wearables.slice(scrollOffset, scrollOffset + ITEMS_PER_PAGE)
-  const hasMore = scrollOffset + ITEMS_PER_PAGE < wearables.length
-  const hasPrev = scrollOffset > 0
+const SLOT_SIZE = 64
+const SLOT_GAP = 4
+const SLOT_RADIUS = 12
+const SLOT_BG = Color4.create(0.08, 0.08, 0.1, 0.87)
+const SLOT_BG_HOVER = Color4.create(0.16, 0.16, 0.22, 0.92)
+const SLOT_BG_SELECTED = Color4.create(0.28, 0.22, 0.08, 0.95)
+const SLOT_EMPTY_BG = Color4.create(0.06, 0.06, 0.08, 0.5)
+const GRID_SLOT_SIZE = 58
+const GRID_SLOT_GAP = 3
+
+const hotbarHover: boolean[] = new Array(HOTBAR_SLOTS).fill(false)
+const gridHover: boolean[] = new Array(GRID_COLS * GRID_ROWS).fill(false)
+let hoveredGridItem: OwnedWearable | null = null
+let selectedGridSlot = -1  // selected empty grid slot index (for receiving hotbar items)
+
+// ── Shared slot renderer ──
+
+function ItemSlot(props: {
+  w: OwnedWearable | null,
+  size: number,
+  radius: number,
+  isSelected: boolean,
+  isHovered: boolean,
+  bgNormal: Color4,
+  bgEmpty: Color4,
+  onEnter: () => void,
+  onLeave: () => void,
+  onDown: () => void,
+  keyStr: string,
+  slotLabel?: string
+}) {
+  const { w, size, radius, isSelected, isHovered, bgNormal, bgEmpty, onEnter, onLeave, onDown, slotLabel } = props
+  const bg = w
+    ? (isSelected ? SLOT_BG_SELECTED : isHovered ? SLOT_BG_HOVER : bgNormal)
+    : bgEmpty
+  const iconSize = Math.round(size * 0.65)
+
+  return (
+    <UiEntity
+      uiTransform={{
+        width: size, height: size,
+        flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        borderRadius: radius
+      }}
+      uiBackground={{ color: bg }}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+      onMouseDown={onDown}
+    >
+      {w && (
+        <UiEntity uiTransform={{ flexDirection: 'column', alignItems: 'center' }}>
+          {w.thumbnail ? (
+            <UiEntity
+              uiTransform={{ width: iconSize, height: iconSize }}
+              uiBackground={{ textureMode: 'stretch', texture: { src: w.thumbnail } }}
+            />
+          ) : (
+            <Label
+              value={w.name.slice(0, 2).toUpperCase()}
+              fontSize={Math.round(size * 0.28)}
+              color={Color4.White()}
+              textAlign="middle-center"
+              uiTransform={{ width: iconSize, height: iconSize }}
+            />
+          )}
+          {/* Rarity bar */}
+          <UiEntity
+            uiTransform={{ width: size - 14, height: 3, margin: { top: 1 }, borderRadius: 2 }}
+            uiBackground={{ color: rarityColor(w.rarity) }}
+          />
+        </UiEntity>
+      )}
+      {/* Selection glow */}
+      {isSelected && (
+        <UiEntity
+          uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: size, height: size, borderRadius: radius }}
+          uiBackground={{ color: Color4.create(1, 0.84, 0, 0.18) }}
+        />
+      )}
+      {/* Slot number label */}
+      {slotLabel && (
+        <Label
+          value={slotLabel}
+          fontSize={10}
+          color={Color4.create(0.45, 0.45, 0.5, 1)}
+          uiTransform={{ positionType: 'absolute', position: { top: 2, left: 6 }, width: 14, height: 14 }}
+        />
+      )}
+    </UiEntity>
+  )
+}
+
+// ── Hotbar (always visible) ──
+
+const Hotbar = () => {
+  ensureHotbarInit()
+
+  const selHotbarIdx = selSource === 'hotbar' ? selIndex : -1
+  const selW = !showInventory && selHotbarIdx >= 0 ? hotbar[selHotbarIdx] : null
 
   return (
     <UiEntity uiTransform={{
       positionType: 'absolute',
-      position: { bottom: '18%', right: '3%' },
-      width: 280,
+      position: { bottom: 20 },
+      width: '100%',
       flexDirection: 'column',
       alignItems: 'center'
-    }}
-    uiBackground={{ color: Color4.create(0.08, 0.08, 0.12, 0.92) }}
-    >
-      {/* Header */}
-      <UiEntity uiTransform={{
-        width: '100%',
-        height: 36,
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        padding: { left: 12, right: 8 }
-      }}
-      uiBackground={{ color: Color4.create(0.12, 0.12, 0.18, 1) }}
-      >
-        <Label
-          value={`YOUR WEARABLES (${wearables.length})`}
-          fontSize={13}
-          color={Color4.create(0.7, 0.7, 0.8, 1)}
-          uiTransform={{ width: 200, height: 30 }}
-        />
-        <Button
-          value="✕"
-          variant="secondary"
-          fontSize={14}
-          uiTransform={{ width: 30, height: 28 }}
-          onMouseDown={() => { showInventory = false }}
-        />
-      </UiEntity>
-
-      {/* Loading state */}
-      {loading && (
-        <Label
-          value="Loading wearables..."
-          fontSize={14}
-          color={Color4.create(0.6, 0.6, 0.7, 1)}
-          uiTransform={{ width: 260, height: 40, margin: { top: 10 } }}
-          textAlign="middle-center"
-        />
-      )}
-
-      {/* Empty state */}
-      {!loading && wearables.length === 0 && (
-        <Label
-          value="No wearables found"
-          fontSize={14}
-          color={Color4.create(0.5, 0.5, 0.6, 1)}
-          uiTransform={{ width: 260, height: 40, margin: { top: 10 } }}
-          textAlign="middle-center"
-        />
-      )}
-
-      {/* Item list */}
-      {pageItems.map((w, i) => {
-        const isPolygon = !!parseWearableUrn(w.urn)
-        return (
-          <UiEntity
-            key={`inv-${scrollOffset + i}`}
-            uiTransform={{
-              width: 264,
-              height: 42,
-              flexDirection: 'row',
-              alignItems: 'center',
-              margin: { top: 2, left: 8, right: 8 },
-              padding: { left: 8, right: 4 }
-            }}
-            uiBackground={{ color: Color4.create(0.14, 0.14, 0.2, 1) }}
-          >
-            {/* Thumbnail or rarity dot */}
-            {w.thumbnail ? (
-              <UiEntity
-                uiTransform={{ width: 36, height: 36, margin: { right: 8 }, flexShrink: 0 }}
-                uiBackground={{
-                  textureMode: 'stretch',
-                  texture: { src: w.thumbnail }
-                }}
-              />
-            ) : (
-              <UiEntity
-                uiTransform={{ width: 8, height: 8, margin: { right: 8 }, flexShrink: 0 }}
-                uiBackground={{ color: rarityColor(w.rarity) }}
-              />
-            )}
-            {/* Name + rarity + chain label */}
-            <UiEntity uiTransform={{ flexDirection: 'column', width: 150 }}>
-              <Label
-                value={w.name.length > 22 ? w.name.slice(0, 20) + '…' : w.name}
-                fontSize={12}
-                color={Color4.White()}
-                uiTransform={{ width: 150, height: 20 }}
-              />
-              <Label
-                value={w.rarity.toUpperCase() + (isPolygon ? ' ⛓️' : ' (L1)')}
-                fontSize={9}
-                color={rarityColor(w.rarity)}
-                uiTransform={{ width: 150, height: 14 }}
-              />
-            </UiEntity>
-            {/* Drop button */}
-            <Button
-              value={isPolygon ? 'DROP ⛓️' : 'DROP'}
-              variant="primary"
-              fontSize={11}
-              uiTransform={{ width: 56, height: 30 }}
-              onMouseDown={() => handleDropItem(w)}
+    }}>
+      {/* Tooltip for selected hotbar item */}
+      {selW && !showInventory && (
+        <UiEntity uiTransform={{
+          flexDirection: 'column', alignItems: 'center',
+          padding: { top: 6, bottom: 6, left: 14, right: 14 },
+          margin: { bottom: 6 }, borderRadius: 10
+        }}
+        uiBackground={{ color: Color4.create(0.05, 0.05, 0.08, 0.94) }}
+        >
+          <Label value={selW.name} fontSize={14} color={Color4.White()} textAlign="middle-center" uiTransform={{ height: 18 }} />
+          <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 2 } }}>
+            <Label
+              value={selW.rarity.toUpperCase() + (parseWearableUrn(selW.urn) ? ' ⛓️' : '')}
+              fontSize={10} color={rarityColor(selW.rarity)}
+              textAlign="middle-center" uiTransform={{ height: 14, margin: { right: 8 } }}
+            />
+            <Button value="DROP" variant="primary" fontSize={11}
+              uiTransform={{ width: 54, height: 24 }}
+              onMouseDown={() => {
+                if (selW) handleDropItem(selW)
+                if (selSource === 'hotbar' && selIndex >= 0) {
+                  hotbar[selIndex] = null
+                  clearSelection()
+                }
+              }}
+            />
+            <Button value="✕" variant="secondary" fontSize={11}
+              uiTransform={{ width: 28, height: 24, margin: { left: 4 } }}
+              onMouseDown={() => {
+                if (selSource === 'hotbar') {
+                  // Move to first empty inventory slot
+                  let placed = false
+                  for (let j = 0; j < inventory.length; j++) {
+                    if (!inventory[j]) { inventory[j] = hotbar[selIndex]; placed = true; break }
+                  }
+                  if (!placed) inventory.push(hotbar[selIndex])
+                  hotbar[selIndex] = null
+                  clearSelection()
+                }
+              }}
             />
           </UiEntity>
-        )
-      })}
+        </UiEntity>
+      )}
 
-      {/* Pagination */}
-      {(hasPrev || hasMore) && (
+      {/* Hotbar slots */}
+      <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+        {Array.from({ length: HOTBAR_SLOTS }).map((_, i) => (
+          <UiEntity key={`hb-${i}`} uiTransform={{ margin: { left: i === 0 ? 0 : SLOT_GAP } }}>
+            {ItemSlot({
+              w: hotbar[i],
+              size: SLOT_SIZE,
+              radius: SLOT_RADIUS,
+              isSelected: selSource === 'hotbar' && selIndex === i,
+              isHovered: hotbarHover[i],
+              bgNormal: SLOT_BG,
+              bgEmpty: SLOT_EMPTY_BG,
+              onEnter: () => { hotbarHover[i] = true },
+              onLeave: () => { hotbarHover[i] = false },
+              onDown: () => { handleSlotClick('hotbar', i) },
+              keyStr: `hb-${i}`,
+              slotLabel: `${i + 1 === 10 ? 0 : i + 1}`
+            })}
+          </UiEntity>
+        ))}
+      </UiEntity>
+    </UiEntity>
+  )
+}
+
+// ── Full inventory grid (opens above hotbar) ──
+
+const InventoryGrid = () => {
+  const loading = isLoading()
+  const invSize = getInventorySize()
+  const PAGE_SIZE = GRID_COLS * GRID_ROWS // 50
+  const totalPages = Math.max(1, Math.ceil(invSize / PAGE_SIZE))
+  const currentPage = Math.floor(gridScrollOffset / PAGE_SIZE)
+  const visibleItems = inventory.slice(gridScrollOffset, gridScrollOffset + PAGE_SIZE)
+  const hasPrev = gridScrollOffset > 0
+  const hasNext = gridScrollOffset + PAGE_SIZE < invSize
+  const itemCount = inventory.filter(Boolean).length
+
+  const gridWidth = GRID_COLS * GRID_SLOT_SIZE + (GRID_COLS - 1) * GRID_SLOT_GAP + 24
+
+  return (
+    <UiEntity uiTransform={{
+      positionType: 'absolute',
+      position: { top: 0, left: 0 },
+      width: '100%',
+      height: '100%',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center'
+    }}>
+      <UiEntity uiTransform={{
+        width: gridWidth,
+        flexDirection: 'column',
+        alignItems: 'center',
+        padding: { top: 10, bottom: 10, left: 12, right: 12 },
+        borderRadius: 14
+      }}
+      uiBackground={{ color: Color4.create(0.06, 0.06, 0.09, 0.94) }}
+      >
+        {/* Descriptor bar — top of panel */}
         <UiEntity uiTransform={{
           width: '100%',
           height: 32,
           flexDirection: 'row',
-          justifyContent: 'center',
           alignItems: 'center',
-          margin: { top: 4, bottom: 4 }
+          justifyContent: 'space-between',
+          margin: { bottom: 6 },
+          padding: { left: 10, right: 4 }
         }}>
-          {hasPrev && (
-            <Button
-              value="◀"
-              variant="secondary"
-              fontSize={12}
-              uiTransform={{ width: 40, height: 26, margin: { right: 8 } }}
-              onMouseDown={() => { scrollOffset = Math.max(0, scrollOffset - ITEMS_PER_PAGE) }}
-            />
-          )}
-          <Label
-            value={`${Math.floor(scrollOffset / ITEMS_PER_PAGE) + 1}/${Math.ceil(wearables.length / ITEMS_PER_PAGE)}`}
-            fontSize={11}
-            color={Color4.create(0.5, 0.5, 0.6, 1)}
-            uiTransform={{ width: 40, height: 24 }}
-            textAlign="middle-center"
-          />
-          {hasMore && (
-            <Button
-              value="▶"
-              variant="secondary"
-              fontSize={12}
-              uiTransform={{ width: 40, height: 26, margin: { left: 8 } }}
-              onMouseDown={() => { scrollOffset += ITEMS_PER_PAGE }}
-            />
-          )}
+          <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', flexGrow: 1 }}>
+            {hoveredGridItem ? (
+              <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Label
+                  value={hoveredGridItem.name}
+                  fontSize={14}
+                  color={Color4.White()}
+                  textAlign="middle-center"
+                  uiTransform={{ height: 20, margin: { right: 10 } }}
+                />
+                <UiEntity
+                  uiTransform={{ width: 8, height: 8, borderRadius: 4, margin: { right: 6 } }}
+                  uiBackground={{ color: rarityColor(hoveredGridItem.rarity) }}
+                />
+                <Label
+                  value={hoveredGridItem.rarity.toUpperCase()}
+                  fontSize={12}
+                  color={rarityColor(hoveredGridItem.rarity)}
+                  textAlign="middle-left"
+                  uiTransform={{ height: 18 }}
+                />
+              </UiEntity>
+            ) : (
+              <Label
+                value="Hover over an item to see details · Click to equip"
+                fontSize={11}
+                color={Color4.create(0.45, 0.45, 0.55, 1)}
+                textAlign="middle-center"
+                uiTransform={{ height: 18 }}
+              />
+            )}
+          </UiEntity>
+          <UiEntity
+            uiTransform={{ width: 24, height: 24, borderRadius: 6, justifyContent: 'center', alignItems: 'center', flexShrink: 0 }}
+            uiBackground={{ color: Color4.create(0.2, 0.12, 0.12, 0.9) }}
+            onMouseDown={() => { showInventory = false }}
+          >
+            <Label value="✕" fontSize={14} color={Color4.create(1, 0.4, 0.4, 1)} textAlign="middle-center" uiTransform={{ width: 24, height: 24 }} />
+          </UiEntity>
         </UiEntity>
-      )}
 
-      {/* Bottom padding */}
-      <UiEntity uiTransform={{ width: 1, height: 6 }} />
+        {/* Loading */}
+        {loading && (
+          <Label value="Loading wearables..." fontSize={13} color={Color4.create(0.5, 0.5, 0.6, 1)} textAlign="middle-center" uiTransform={{ height: 40 }} />
+        )}
+
+        {/* Empty */}
+        {!loading && itemCount === 0 && (
+          <Label value="Inventory empty — unequip items from your hotbar" fontSize={12} color={Color4.create(0.4, 0.4, 0.5, 1)} textAlign="middle-center" uiTransform={{ height: 40 }} />
+        )}
+
+        {/* Grid rows */}
+        {Array.from({ length: GRID_ROWS }).map((_, row) => (
+          <UiEntity key={`grow-${row}`} uiTransform={{ flexDirection: 'row', margin: { top: row === 0 ? 0 : GRID_SLOT_GAP } }}>
+            {Array.from({ length: GRID_COLS }).map((_, col) => {
+              const localIdx = row * GRID_COLS + col
+              const absIdx = gridScrollOffset + localIdx
+              const w = localIdx < visibleItems.length ? visibleItems[localIdx] || null : null
+              return (
+                <UiEntity key={`gs-${row}-${col}`} uiTransform={{ margin: { left: col === 0 ? 0 : GRID_SLOT_GAP } }}>
+                  {ItemSlot({
+                    w,
+                    size: GRID_SLOT_SIZE,
+                    radius: 10,
+                    isSelected: selSource === 'grid' && selIndex === absIdx,
+                    isHovered: gridHover[localIdx] || false,
+                    bgNormal: SLOT_BG,
+                    bgEmpty: SLOT_EMPTY_BG,
+                    onEnter: () => { gridHover[localIdx] = true; hoveredGridItem = w },
+                    onLeave: () => { gridHover[localIdx] = false; if (hoveredGridItem === w) hoveredGridItem = null },
+                    onDown: () => { handleSlotClick('grid', absIdx) },
+                    keyStr: `gs-${row}-${col}`
+                  })}
+                </UiEntity>
+              )
+            })}
+          </UiEntity>
+        ))}
+
+        {/* Pagination row — inside panel */}
+        <UiEntity uiTransform={{
+          width: '100%',
+          height: 30,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'center',
+          margin: { top: 8 }
+        }}>
+          <UiEntity
+            uiTransform={{ width: 30, height: 24, borderRadius: 6, justifyContent: 'center', alignItems: 'center', margin: { right: 12 } }}
+            uiBackground={{ color: hasPrev ? SLOT_BG_HOVER : Color4.create(0.06, 0.06, 0.08, 0.3) }}
+            onMouseDown={() => { if (hasPrev) { gridScrollOffset = Math.max(0, gridScrollOffset - PAGE_SIZE); hoveredGridItem = null } }}
+          >
+            <Label value="◀" fontSize={14} color={hasPrev ? Color4.create(0.8, 0.8, 0.9, 1) : Color4.create(0.25, 0.25, 0.3, 1)} textAlign="middle-center" uiTransform={{ width: 30, height: 24 }} />
+          </UiEntity>
+          <Label
+            value={`Page ${currentPage + 1} of ${totalPages}`}
+            fontSize={12}
+            color={Color4.create(0.6, 0.6, 0.7, 1)}
+            textAlign="middle-center"
+            uiTransform={{ width: 100, height: 24 }}
+          />
+          <UiEntity
+            uiTransform={{ width: 30, height: 24, borderRadius: 6, justifyContent: 'center', alignItems: 'center', margin: { left: 12 } }}
+            uiBackground={{ color: hasNext ? SLOT_BG_HOVER : Color4.create(0.06, 0.06, 0.08, 0.3) }}
+            onMouseDown={() => { if (hasNext) { gridScrollOffset += PAGE_SIZE; hoveredGridItem = null } }}
+          >
+            <Label value="▶" fontSize={14} color={hasNext ? Color4.create(0.8, 0.8, 0.9, 1) : Color4.create(0.25, 0.25, 0.3, 1)} textAlign="middle-center" uiTransform={{ width: 30, height: 24 }} />
+          </UiEntity>
+        </UiEntity>
+      </UiEntity>
+
+
     </UiEntity>
   )
 }
@@ -304,25 +564,28 @@ const LootDropUI = () => {
 
   return (
     <UiEntity uiTransform={{ width: '100%', height: '100%', positionType: 'absolute' }}>
-      {/* Drop button — bottom right */}
-      <UiEntity uiTransform={{
-        positionType: 'absolute',
-        position: { bottom: '10%', right: '3%' },
-        width: 160,
-        height: 50
-      }}>
-        <Button
-          value={showInventory ? 'CANCEL' : 'DROP ITEM'}
-          variant="primary"
-          fontSize={16}
-          color={Color4.White()}
-          uiTransform={{ width: 160, height: 50 }}
-          onMouseDown={toggleInventory}
-        />
-      </UiEntity>
+      {/* Hotbar — always visible at bottom */}
+      <Hotbar />
 
-      {/* Inventory panel */}
-      {showInventory && <InventoryPanel />}
+      {/* Inventory grid — opens above hotbar */}
+      {showInventory && <InventoryGrid />}
+
+      {/* Inventory toggle button — bottom right, above hotbar */}
+      {!showInventory && (
+        <UiEntity uiTransform={{
+          positionType: 'absolute',
+          position: { bottom: SLOT_SIZE + 30, right: 20 },
+          width: 120, height: 32,
+          borderRadius: 10,
+          justifyContent: 'center',
+          alignItems: 'center'
+        }}
+        uiBackground={{ color: Color4.create(0.1, 0.1, 0.14, 0.88) }}
+        onMouseDown={toggleInventory}
+        >
+          <Label value="🎒 INVENTORY" fontSize={12} color={Color4.create(0.75, 0.75, 0.85, 1)} textAlign="middle-center" uiTransform={{ width: 120, height: 32 }} />
+        </UiEntity>
+      )}
 
       {/* Transaction status — center of screen */}
       {showTx && (
