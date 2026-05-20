@@ -164,6 +164,32 @@ function toggleInventory(): void {
   clearSelection()
 }
 
+// ── Drop confirmation modal state ──
+
+let showDropConfirm = false
+let dropConfirmItem: OwnedWearable | null = null
+let dropConfirmSlot = -1 // hotbar index to clear after drop
+
+function openDropConfirm(w: OwnedWearable, hotbarIdx: number): void {
+  dropConfirmItem = w
+  dropConfirmSlot = hotbarIdx
+  showDropConfirm = true
+}
+
+function closeDropConfirm(): void {
+  showDropConfirm = false
+  dropConfirmItem = null
+  dropConfirmSlot = -1
+}
+
+function confirmDrop(): void {
+  if (!dropConfirmItem) return
+  handleDropItem(dropConfirmItem)
+  if (dropConfirmSlot >= 0) hotbar[dropConfirmSlot] = null
+  clearSelection()
+  closeDropConfirm()
+}
+
 function handleDropItem(w: OwnedWearable): void {
   if (!isStateSyncronized()) return
   const now = Date.now()
@@ -226,8 +252,8 @@ const SLOT_BG = Color4.create(0.08, 0.08, 0.1, 0.87)
 const SLOT_BG_HOVER = Color4.create(0.16, 0.16, 0.22, 0.92)
 const SLOT_BG_SELECTED = Color4.create(0.28, 0.22, 0.08, 0.95)
 const SLOT_EMPTY_BG = Color4.create(0.06, 0.06, 0.08, 0.5)
-const GRID_SLOT_SIZE = 58
-const GRID_SLOT_GAP = 3
+const GRID_SLOT_SIZE = SLOT_SIZE
+const GRID_SLOT_GAP = SLOT_GAP
 
 const hotbarHover: boolean[] = new Array(HOTBAR_SLOTS).fill(false)
 const gridHover: boolean[] = new Array(GRID_COLS * GRID_ROWS).fill(false)
@@ -316,10 +342,22 @@ function ItemSlot(props: {
 const Hotbar = () => {
   ensureHotbarInit()
 
-  const selHotbarIdx = selSource === 'hotbar' ? selIndex : -1
-  const selW = !showInventory && selHotbarIdx >= 0 ? hotbar[selHotbarIdx] : null
+  const hasSelection = selSource === 'hotbar' && selIndex >= 0 && !showInventory && hotbar[selIndex] != null
 
   return (
+    <UiEntity uiTransform={{
+      positionType: 'absolute',
+      position: { top: 0, left: 0 },
+      width: '100%', height: '100%'
+    }}>
+    {/* Dismiss backdrop — catches clicks outside the hotbar */}
+    {hasSelection && (
+      <UiEntity
+        uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: '100%', height: '100%' }}
+        uiBackground={{ color: Color4.create(0, 0, 0, 0.01) }}
+        onMouseDown={() => { clearSelection() }}
+      />
+    )}
     <UiEntity uiTransform={{
       positionType: 'absolute',
       position: { bottom: 20 },
@@ -327,55 +365,40 @@ const Hotbar = () => {
       flexDirection: 'column',
       alignItems: 'center'
     }}>
-      {/* Tooltip for selected hotbar item */}
-      {selW && !showInventory && (
-        <UiEntity uiTransform={{
-          flexDirection: 'column', alignItems: 'center',
-          padding: { top: 6, bottom: 6, left: 14, right: 14 },
-          margin: { bottom: 6 }, borderRadius: 10
-        }}
-        uiBackground={{ color: Color4.create(0.05, 0.05, 0.08, 0.94) }}
-        >
-          <Label value={selW.name} fontSize={14} color={Color4.White()} textAlign="middle-center" uiTransform={{ height: 18 }} />
-          <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { top: 2 } }}>
-            <Label
-              value={selW.rarity.toUpperCase() + (parseWearableUrn(selW.urn) ? ' ⛓️' : '')}
-              fontSize={10} color={rarityColor(selW.rarity)}
-              textAlign="middle-center" uiTransform={{ height: 14, margin: { right: 8 } }}
-            />
-            <Button value="DROP" variant="primary" fontSize={11}
-              uiTransform={{ width: 54, height: 24 }}
-              onMouseDown={() => {
-                if (selW) handleDropItem(selW)
-                if (selSource === 'hotbar' && selIndex >= 0) {
-                  hotbar[selIndex] = null
-                  clearSelection()
-                }
-              }}
-            />
-            <Button value="✕" variant="secondary" fontSize={11}
-              uiTransform={{ width: 28, height: 24, margin: { left: 4 } }}
-              onMouseDown={() => {
-                if (selSource === 'hotbar') {
-                  // Move to first empty inventory slot
-                  let placed = false
-                  for (let j = 0; j < inventory.length; j++) {
-                    if (!inventory[j]) { inventory[j] = hotbar[selIndex]; placed = true; break }
-                  }
-                  if (!placed) inventory.push(hotbar[selIndex])
-                  hotbar[selIndex] = null
-                  clearSelection()
-                }
-              }}
-            />
-          </UiEntity>
-        </UiEntity>
-      )}
-
       {/* Hotbar slots */}
       <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
-        {Array.from({ length: HOTBAR_SLOTS }).map((_, i) => (
-          <UiEntity key={`hb-${i}`} uiTransform={{ margin: { left: i === 0 ? 0 : SLOT_GAP } }}>
+        {Array.from({ length: HOTBAR_SLOTS }).map((_, i) => {
+          const isThisSelected = selSource === 'hotbar' && selIndex === i && !showInventory && hotbar[i] != null
+          return (
+          <UiEntity key={`hb-wrap-${i}`} uiTransform={{
+            width: SLOT_SIZE, height: SLOT_SIZE,
+            margin: { left: i === 0 ? 0 : SLOT_GAP }
+          }}>
+            {/* Unified pop-up: extends behind the card with drop button below */}
+            {isThisSelected && (
+              <UiEntity uiTransform={{
+                positionType: 'absolute',
+                position: { bottom: 0, left: 0 },
+                width: SLOT_SIZE,
+                height: SLOT_SIZE + 36,
+                flexDirection: 'column', alignItems: 'center',
+                padding: { top: 5, left: 4, right: 4 },
+                borderRadius: SLOT_RADIUS
+              }}
+              uiBackground={{ color: Color4.create(0.05, 0.05, 0.08, 0.94) }}
+              >
+                <UiEntity
+                  uiTransform={{ width: SLOT_SIZE - 12, height: 26, borderRadius: 8, justifyContent: 'center', alignItems: 'center' }}
+                  uiBackground={{ color: Color4.create(0.85, 0.2, 0.2, 1) }}
+                  onMouseDown={() => {
+                    const w = hotbar[i]
+                    if (w) openDropConfirm(w, i)
+                  }}
+                >
+                  <Label value="DROP" fontSize={11} color={Color4.White()} textAlign="middle-center" uiTransform={{ width: SLOT_SIZE - 12, height: 26 }} />
+                </UiEntity>
+              </UiEntity>
+            )}
             {ItemSlot({
               w: hotbar[i],
               size: SLOT_SIZE,
@@ -384,15 +407,17 @@ const Hotbar = () => {
               isHovered: hotbarHover[i],
               bgNormal: SLOT_BG,
               bgEmpty: SLOT_EMPTY_BG,
-              onEnter: () => { hotbarHover[i] = true },
-              onLeave: () => { hotbarHover[i] = false },
+              onEnter: () => { hotbarHover[i] = true; if (showInventory) hoveredGridItem = hotbar[i] || null },
+              onLeave: () => { hotbarHover[i] = false; if (showInventory && hoveredGridItem === hotbar[i]) hoveredGridItem = null },
               onDown: () => { handleSlotClick('hotbar', i) },
               keyStr: `hb-${i}`,
               slotLabel: `${i + 1 === 10 ? 0 : i + 1}`
             })}
           </UiEntity>
-        ))}
+          )
+        })}
       </UiEntity>
+    </UiEntity>
     </UiEntity>
   )
 }
@@ -410,7 +435,7 @@ const InventoryGrid = () => {
   const hasNext = gridScrollOffset + PAGE_SIZE < invSize
   const itemCount = inventory.filter(Boolean).length
 
-  const gridWidth = GRID_COLS * GRID_SLOT_SIZE + (GRID_COLS - 1) * GRID_SLOT_GAP + 24
+  const gridWidth = GRID_COLS * GRID_SLOT_SIZE + (GRID_COLS - 1) * GRID_SLOT_GAP + 24 // matches hotbar row width + panel padding
 
   return (
     <UiEntity uiTransform={{
@@ -558,6 +583,116 @@ const InventoryGrid = () => {
   )
 }
 
+// ── Drop confirmation modal ──
+
+const DropConfirmModal = () => {
+  if (!dropConfirmItem) return null
+  const w = dropConfirmItem
+  const iconSize = 128
+
+  return (
+    <UiEntity uiTransform={{
+      positionType: 'absolute',
+      position: { top: 0, left: 0 },
+      width: '100%', height: '100%',
+      justifyContent: 'center', alignItems: 'center'
+    }}>
+      {/* Backdrop */}
+      <UiEntity uiTransform={{
+        positionType: 'absolute',
+        position: { top: 0, left: 0 },
+        width: '100%', height: '100%'
+      }}
+      uiBackground={{ color: Color4.create(0, 0, 0, 0.6) }}
+      onMouseDown={() => { closeDropConfirm() }}
+      />
+      {/* Modal card */}
+      <UiEntity uiTransform={{
+        width: 280,
+        flexDirection: 'column', alignItems: 'center',
+        padding: { top: 20, bottom: 20, left: 20, right: 20 },
+        borderRadius: 16
+      }}
+      uiBackground={{ color: Color4.create(0.08, 0.08, 0.1, 0.96) }}
+      >
+        {/* Item thumbnail */}
+        {w.thumbnail ? (
+          <UiEntity
+            uiTransform={{ width: iconSize, height: iconSize, borderRadius: 12, margin: { bottom: 12 } }}
+            uiBackground={{ textureMode: 'stretch', texture: { src: w.thumbnail } }}
+          />
+        ) : (
+          <UiEntity
+            uiTransform={{ width: iconSize, height: iconSize, borderRadius: 12, margin: { bottom: 12 }, justifyContent: 'center', alignItems: 'center' }}
+            uiBackground={{ color: Color4.create(0.12, 0.12, 0.15, 1) }}
+          >
+            <Label value={w.name.slice(0, 2).toUpperCase()} fontSize={40} color={Color4.White()} textAlign="middle-center" uiTransform={{ width: iconSize, height: iconSize }} />
+          </UiEntity>
+        )}
+
+        {/* Item name */}
+        <Label
+          value={w.name}
+          fontSize={18}
+          color={Color4.White()}
+          textAlign="middle-center"
+          textWrap="wrap"
+          uiTransform={{ width: 240, height: 48, margin: { bottom: 4 } }}
+        />
+
+        {/* Rarity badge */}
+        <UiEntity uiTransform={{ flexDirection: 'row', alignItems: 'center', margin: { bottom: 14 } }}>
+          <UiEntity
+            uiTransform={{ width: 8, height: 8, borderRadius: 4, margin: { right: 6 } }}
+            uiBackground={{ color: rarityColor(w.rarity) }}
+          />
+          <Label
+            value={w.rarity.toUpperCase()}
+            fontSize={12}
+            color={rarityColor(w.rarity)}
+            textAlign="middle-left"
+            uiTransform={{ height: 16 }}
+          />
+        </UiEntity>
+
+        {/* Confirmation text */}
+        <Label
+          value="Are you sure you want"
+          fontSize={14}
+          color={Color4.create(0.7, 0.7, 0.75, 1)}
+          textAlign="middle-center"
+          uiTransform={{ width: 240, height: 18 }}
+        />
+        <Label
+          value="to drop this item?"
+          fontSize={14}
+          color={Color4.create(0.7, 0.7, 0.75, 1)}
+          textAlign="middle-center"
+          uiTransform={{ width: 240, height: 18, margin: { bottom: 16 } }}
+        />
+
+        {/* Drop button */}
+        <UiEntity
+          uiTransform={{ width: 200, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: Color4.create(0.85, 0.2, 0.2, 1) }}
+          onMouseDown={() => { confirmDrop() }}
+        >
+          <Label value="DROP ITEM" fontSize={14} color={Color4.White()} textAlign="middle-center" uiTransform={{ width: 200, height: 36 }} />
+        </UiEntity>
+
+        {/* Cancel button */}
+        <UiEntity
+          uiTransform={{ width: 200, height: 32, borderRadius: 10, justifyContent: 'center', alignItems: 'center' }}
+          uiBackground={{ color: Color4.create(0.15, 0.15, 0.18, 0.9) }}
+          onMouseDown={() => { closeDropConfirm() }}
+        >
+          <Label value="Cancel" fontSize={13} color={Color4.create(0.6, 0.6, 0.65, 1)} textAlign="middle-center" uiTransform={{ width: 200, height: 32 }} />
+        </UiEntity>
+      </UiEntity>
+    </UiEntity>
+  )
+}
+
 const LootDropUI = () => {
   const showNotification = Date.now() < notificationUntil
   const showTx = Date.now() < txStatusUntil
@@ -611,6 +746,9 @@ const LootDropUI = () => {
           </UiEntity>
         </UiEntity>
       )}
+
+      {/* Drop confirmation modal */}
+      {showDropConfirm && <DropConfirmModal />}
 
       {/* Pickup notification — top center */}
       {showNotification && (

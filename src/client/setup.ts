@@ -4,9 +4,21 @@ import { Rarity, DroppedItem } from '../shared/items'
 import { spawnItemCard, removeItemCard, clearAllItems, itemAnimationSystem } from './itemRenderer'
 import { showPickupNotification, showTxStatus } from './ui'
 import { executeClaim } from './blockchain'
+import { fetchWearables, isLoaded, isLoading } from './inventory'
+import { getPlayer } from '@dcl/sdk/src/players'
 
 export function setupClient(): void {
   console.log('[Client] Setting up LootDrop client...')
+
+  // Poll until player is available, then fetch wearables
+  let fetchAttempted = false
+  engine.addSystem(() => {
+    if (fetchAttempted) return
+    const player = getPlayer()
+    if (!player) return
+    fetchAttempted = true
+    if (!isLoaded() && !isLoading()) fetchWearables()
+  })
 
   // Handle new item dropped
   room.onMessage('itemDropped', (data) => {
