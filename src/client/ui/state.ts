@@ -4,6 +4,7 @@
  */
 import { Color4 } from '@dcl/sdk/math'
 import { isStateSyncronized } from '@dcl/sdk/network'
+import { getRealm } from '~system/Runtime'
 import { room } from '../../shared/messages'
 import { Rarity, OwnedWearable } from '../../shared/items'
 import { getWearables, isLoading, isLoaded, fetchWearables } from '../inventory'
@@ -104,6 +105,29 @@ export function toggleInventory(): void {
   clearSelection()
 }
 
+/** Add a picked-up item to the first empty hotbar slot, or inventory if hotbar is full. */
+export function addItemToInventory(w: OwnedWearable): void {
+  // Try hotbar first
+  for (let i = 0; i < hotbar.length; i++) {
+    if (!hotbar[i]) {
+      hotbar[i] = w
+      console.log('[UI] Added', w.name, 'to hotbar slot', i)
+      return
+    }
+  }
+  // Try inventory
+  for (let i = 0; i < inventory.length; i++) {
+    if (!inventory[i]) {
+      inventory[i] = w
+      console.log('[UI] Added', w.name, 'to inventory slot', i)
+      return
+    }
+  }
+  // Append to inventory
+  inventory.push(w)
+  console.log('[UI] Added', w.name, 'to end of inventory')
+}
+
 export function setShowInventory(v: boolean): void { showInventory = v }
 export function setGridScrollOffset(v: number): void { gridScrollOffset = v }
 
@@ -140,6 +164,18 @@ export function confirmDrop(): void {
 // ═══════════════════════════════════════════
 
 let lastDropTime = 0
+let cachedIsPreview: boolean | null = null
+
+async function checkIsPreview(): Promise<boolean> {
+  if (cachedIsPreview !== null) return cachedIsPreview
+  try {
+    const realm = await getRealm({})
+    cachedIsPreview = realm.realmInfo?.isPreview ?? false
+  } catch {
+    cachedIsPreview = false
+  }
+  return cachedIsPreview
+}
 
 function handleDropItem(w: OwnedWearable): void {
   if (!isStateSyncronized()) return
@@ -151,30 +187,43 @@ function handleDropItem(w: OwnedWearable): void {
   const parsed = parseWearableUrn(w.urn)
 
   if (parsed && parsed.chain === 'matic') {
-    showTxStatus('approving')
-    executeDeposit(
-      parsed.collection,
-      parsed.itemId,
-      (onChainDropId) => {
-        showTxStatus('confirmed')
-        room.send('confirmDrop', {
-          name: w.name,
-          rarity: w.rarity,
-          urn: w.urn,
-          onChainDropId,
-          collection: parsed.collection,
-          tokenId: ''
-        })
-        setTimeout(() => showTxStatus('idle'), 3000)
-      },
-      (error) => {
-        showTxStatus('error', error)
-        setTimeout(() => showTxStatus('idle'), 5000)
+    // Check if we're in preview — skip on-chain flow
+    checkIsPreview().then((preview) => {
+      if (preview) {
+        console.log('[Drop] Preview mode — skipping on-chain deposit, using mock drop')
+        room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
+        return
       }
-    )
-  } else {
-    room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
+      _executeOnChainDrop(w, parsed)
+    })
+    return
   }
+
+  room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
+}
+
+function _executeOnChainDrop(w: OwnedWearable, parsed: { collection: string; itemId: number }): void {
+  showTxStatus('approving')
+  executeDeposit(
+    parsed.collection,
+    parsed.itemId,
+    (onChainDropId) => {
+      showTxStatus('confirmed')
+      room.send('confirmDrop', {
+        name: w.name,
+        rarity: w.rarity,
+        urn: w.urn,
+        onChainDropId,
+        collection: parsed.collection,
+        tokenId: ''
+      })
+      setTimeout(() => showTxStatus('idle'), 3000)
+    },
+    (error) => {
+      showTxStatus('error', error)
+      setTimeout(() => showTxStatus('idle'), 5000)
+    }
+  )
 }
 
 // ═══════════════════════════════════════════

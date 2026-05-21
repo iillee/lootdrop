@@ -3,8 +3,9 @@ import { room } from '../shared/messages'
 import { Rarity, DroppedItem } from '../shared/items'
 import { spawnItemCard, removeItemCard, clearAllItems, itemAnimationSystem } from './itemRenderer'
 import { showPickupNotification, showTxStatus } from './ui'
+import { addItemToInventory } from './ui/state'
 import { executeClaim } from './blockchain'
-import { fetchWearables, isLoaded, isLoading } from './inventory'
+import { fetchWearables, isLoaded, isLoading, getWearables } from './inventory'
 import { getPlayer } from '@dcl/sdk/src/players'
 
 export function setupClient(): void {
@@ -31,6 +32,20 @@ export function setupClient(): void {
     console.log('[Client] Item picked up:', data.itemName, 'by', data.pickerName)
     removeItemCard(data.id)
     showPickupNotification(data.pickerName, data.itemName, data.rarity as Rarity)
+
+    // If we're the picker, add the item back to our inventory
+    const player = getPlayer()
+    if (player && data.pickerId.toLowerCase() === player.userId.toLowerCase()) {
+      // Try to find the original wearable data (with thumbnail) from our fetched wearables
+      const known = getWearables().find(w => w.name === data.itemName && w.rarity === data.rarity)
+      addItemToInventory({
+        urn: known?.urn || '',
+        name: data.itemName,
+        rarity: data.rarity as Rarity,
+        category: known?.category || 'pickup',
+        thumbnail: known?.thumbnail || ''
+      })
+    }
   })
 
   // Handle full sync (on connect)
