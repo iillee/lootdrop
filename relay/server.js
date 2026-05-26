@@ -79,24 +79,41 @@ async function verifyDCLAuth(req) {
       return null
     }
 
-    // Try multiple payload formats — signedFetch format varies by client version
+    // Log the auth chain for debugging
+    console.log('[Auth] Chain length:', authChain.length)
+    authChain.forEach((link, i) => {
+      console.log(`[Auth] Link ${i}: type=${link.type}, payload=${(link.payload || '').slice(0, 120)}...`)
+    })
+
+    // The signedFetch payload is typically: "get:url" or "post:url:body"
+    // Try multiple payload formats
     const rawBody = req.rawBody || JSON.stringify(req.body)
+    const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`
     const payloads = [
+      `${req.method.toLowerCase()}:${fullUrl}:${rawBody}`,
+      `${req.method.toLowerCase()}:${fullUrl}`,
       `${req.method.toLowerCase()}:${req.originalUrl}:${rawBody}`,
       `${req.method.toLowerCase()}:${req.url}:${rawBody}`,
-      `post:${req.originalUrl}:${rawBody}`,
+      `post:${fullUrl}:${rawBody}`,
+      `post:/drop:${rawBody}`,
+      `post:/claim:${rawBody}`,
       rawBody
     ]
 
     for (const payload of payloads) {
       const result = await Authenticator.validateSignature(payload, authChain, null)
       if (result.ok) {
-        console.log('[Auth] Verified with payload format:', payload.slice(0, 50) + '...')
+        console.log('[Auth] ✅ Verified with payload:', payload.slice(0, 80))
         return authChain[0].payload.toLowerCase()
       }
     }
 
-    console.warn('[Auth] All payload formats failed. Headers:', Object.keys(req.headers).filter(h => h.startsWith('x-identity')).join(', '))
+    // Last resort: try with the timestamp metadata
+    const timestamp = req.headers['x-identity-timestamp']
+    const metadata = req.headers['x-identity-metadata']
+    console.warn('[Auth] All payload formats failed.')
+    console.warn('[Auth] Tried:', payloads.map(p => p.slice(0, 60)).join(' | '))
+    console.warn('[Auth] Timestamp:', timestamp, 'Metadata:', metadata)
     console.warn('[Auth] Raw body:', rawBody.slice(0, 100))
     return null
   } catch (err) {
