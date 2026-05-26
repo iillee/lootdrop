@@ -11,6 +11,10 @@
 import { signedFetch } from '~system/SignedFetch'
 import { RELAY_URL } from '../shared/contracts'
 
+function safeParseJson(str: string): any {
+  try { return JSON.parse(str) } catch { return { error: str || 'Unknown error' } }
+}
+
 // ── Status tracking ──
 
 export type TxStatus = 'idle' | 'approving' | 'depositing' | 'claiming' | 'confirmed' | 'error'
@@ -67,7 +71,7 @@ export async function approveAndDeposit(collection: string, tokenId: string): Pr
     })
 
     if (!res.ok) {
-      const body = res.body ? JSON.parse(res.body) : { error: 'Unknown error' }
+      const body = res.body ? safeParseJson(res.body) : { error: 'Unknown error' }
       const errMsg = body.error || `Relay returned ${res.status}`
 
       // If the NFT isn't approved, give a helpful message
@@ -82,7 +86,7 @@ export async function approveAndDeposit(collection: string, tokenId: string): Pr
       return { success: false, dropId: -1, error: errMsg }
     }
 
-    const data = JSON.parse(res.body)
+    const data = safeParseJson(res.body)
     console.log('[Blockchain] ✅ Relay drop success! dropId:', data.dropId, 'tx:', data.txHash)
 
     currentStatus = 'confirmed'
@@ -123,13 +127,13 @@ export async function claimDrop(dropId: number): Promise<ClaimResult> {
     })
 
     if (!res.ok) {
-      const body = res.body ? JSON.parse(res.body) : { error: 'Unknown error' }
+      const body = res.body ? safeParseJson(res.body) : { error: 'Unknown error' }
       currentStatus = 'error'
       currentError = body.error || `Relay returned ${res.status}`
       return { success: false, txHash: '', error: currentError }
     }
 
-    const data = JSON.parse(res.body)
+    const data = safeParseJson(res.body)
     console.log('[Blockchain] ✅ Relay claim success! tx:', data.txHash)
 
     currentStatus = 'confirmed'
