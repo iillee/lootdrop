@@ -20,7 +20,13 @@ const path = require('path')
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+
+// Capture raw body before JSON parsing (needed for signedFetch verification)
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf.toString()
+  }
+}))
 
 // ── Config ──
 
@@ -68,16 +74,30 @@ async function verifyDCLAuth(req) {
       authChain.push(JSON.parse(header))
     }
 
-    if (authChain.length === 0) return null
-
-    const payload = `${req.method.toLowerCase()}:${req.originalUrl}:${JSON.stringify(req.body)}`
-    const result = await Authenticator.validateSignature(payload, authChain, null)
-
-    if (result.ok) {
-      return authChain[0].payload.toLowerCase()
+    if (authChain.length === 0) {
+      console.warn('[Auth] No auth chain headers found')
+      return null
     }
 
-    console.warn('[Auth] Validation failed:', result.message)
+    // Try multiple payload formats — signedFetch format varies by client version
+    const rawBody = req.rawBody || JSON.stringify(req.body)
+    const payloads = [
+      `${req.method.toLowerCase()}:${req.originalUrl}:${rawBody}`,
+      `${req.method.toLowerCase()}:${req.url}:${rawBody}`,
+      `post:${req.originalUrl}:${rawBody}`,
+      rawBody
+    ]
+
+    for (const payload of payloads) {
+      const result = await Authenticator.validateSignature(payload, authChain, null)
+      if (result.ok) {
+        console.log('[Auth] Verified with payload format:', payload.slice(0, 50) + '...')
+        return authChain[0].payload.toLowerCase()
+      }
+    }
+
+    console.warn('[Auth] All payload formats failed. Headers:', Object.keys(req.headers).filter(h => h.startsWith('x-identity')).join(', '))
+    console.warn('[Auth] Raw body:', rawBody.slice(0, 100))
     return null
   } catch (err) {
     console.error('[Auth] Error:', err.message)
