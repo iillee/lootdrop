@@ -1,12 +1,13 @@
-import { engine } from '@dcl/sdk/ecs'
+import { engine, executeTask } from '@dcl/sdk/ecs'
 import { room } from '../shared/messages'
 import { Rarity, DroppedItem } from '../shared/items'
 import { spawnItemCard, removeItemCard, clearAllItems, itemAnimationSystem } from './itemRenderer'
 import { showPickupNotification, showTxStatus } from './ui'
-import { addItemToInventory } from './ui/state'
-import { executeClaim } from './blockchain'
+import { addItemToInventory, removeItemFromInventoryByUrn, confirmDropFromServer, rejectDrop } from './ui/state'
 import { fetchWearables, isLoaded, isLoading, getWearables } from './inventory'
+import { ensureHotbarInit } from './ui/state'
 import { getPlayer } from '@dcl/sdk/src/players'
+import { claimDrop } from './blockchain'
 
 export function setupClient(): void {
   console.log('[Client] Setting up LootDrop client...')
@@ -21,10 +22,11 @@ export function setupClient(): void {
     if (!isLoaded() && !isLoading()) fetchWearables()
   })
 
-  // Handle new item dropped
+  // Handle new item dropped — server confirmed
   room.onMessage('itemDropped', (data) => {
-    console.log('[Client] Item dropped:', data.name, data.onChainDropId ? '(on-chain)' : '(mock)')
-    spawnItemCard(data.id, data.name, data.rarity as Rarity, data.x, data.y, data.z, data.onChainDropId || '')
+    console.log('[Client] Item dropped:', data.name, data.dropId >= 0 ? '(on-chain #' + data.dropId + ')' : '(mock)')
+    confirmDropFromServer()
+    spawnItemCard(data.id, data.name, data.rarity as Rarity, data.x, data.y, data.z, data.thumbnail)
   })
 
   // Handle item picked up
@@ -33,19 +35,44 @@ export function setupClient(): void {
     removeItemCard(data.id)
     showPickupNotification(data.pickerName, data.itemName, data.rarity as Rarity)
 
-    // If we're the picker, add the item back to our inventory
+    // If we're the picker, add the item to our inventory
     const player = getPlayer()
     if (player && data.pickerId.toLowerCase() === player.userId.toLowerCase()) {
-      // Try to find the original wearable data (with thumbnail) from our fetched wearables
-      const known = getWearables().find(w => w.name === data.itemName && w.rarity === data.rarity)
       addItemToInventory({
-        urn: known?.urn || '',
+        urn: data.urn || '',
         name: data.itemName,
         rarity: data.rarity as Rarity,
-        category: known?.category || 'pickup',
-        thumbnail: known?.thumbnail || ''
+        category: 'pickup',
+        thumbnail: data.thumbnail || '',
+        collection: data.collection || '',
+        tokenId: data.tokenId || ''
       })
     }
+  })
+
+  // Handle server approving a pickup — now do the on-chain claim
+  room.onMessage('approvePickup', (data) => {
+    console.log('[Client] Pickup approved for', data.itemName, '— claiming on-chain, dropId:', data.dropId)
+
+    showTxStatus('⛓️ Claiming ' + data.itemName + '...')
+
+    executeTask(async () => {
+      try {
+        const result = await claimDrop(data.dropId)
+
+        if (result.success) {
+          showTxStatus('confirmed')
+          // Tell server the claim succeeded
+          room.send('confirmPickup', { itemId: data.itemId, txHash: result.txHash })
+        } else {
+          showTxStatus('error', result.error || 'Claim transaction failed')
+          console.error('[Client] On-chain claim failed:', result.error)
+        }
+      } catch (err: any) {
+        showTxStatus('error', err.message || 'Claim failed')
+        console.error('[Client] Claim error:', err)
+      }
+    })
   })
 
   // Handle full sync (on connect)
@@ -54,35 +81,39 @@ export function setupClient(): void {
     console.log('[Client] Syncing', items.length, 'items')
     clearAllItems()
     for (const item of items) {
-      spawnItemCard(item.id, item.name, item.rarity, item.x, item.y, item.z, item.onChainDropId || '')
+      spawnItemCard(item.id, item.name, item.rarity, item.x, item.y, item.z, item.thumbnail || '')
     }
   })
 
-  // Handle pickup approval — server says we're close enough, now do the on-chain claim
-  room.onMessage('approvePickup', (data) => {
-    console.log('[Client] Pickup approved for item', data.itemId, '— claiming on-chain dropId', data.onChainDropId)
-    showTxStatus('claiming')
-
-    executeClaim(
-      data.onChainDropId,
-      () => {
-        // On-chain claim succeeded — tell server
-        console.log('[Client] On-chain claim confirmed! Notifying server...')
-        showTxStatus('confirmed')
-        room.send('confirmPickup', { itemId: data.itemId, onChainDropId: data.onChainDropId })
-        setTimeout(() => showTxStatus('idle'), 3000)
-      },
-      (error) => {
-        console.error('[Client] On-chain claim failed:', error)
-        showTxStatus('error', error)
-        setTimeout(() => showTxStatus('idle'), 5000)
-      }
-    )
+  // Handle dropped URNs — filter these from our inventory
+  let pendingFilterUrns: string[] = []
+  room.onMessage('droppedUrns', (data) => {
+    const urns: string[] = JSON.parse(data.urnsJson)
+    console.log('[Client] Filtering', urns.length, 'already-dropped items from inventory')
+    pendingFilterUrns = urns
+    for (const urn of urns) {
+      removeItemFromInventoryByUrn(urn)
+    }
   })
 
-  // Handle errors
+  // Re-apply filter after inventory loads
+  let lastLoadedState = false
+  engine.addSystem(() => {
+    const nowLoaded = isLoaded()
+    if (nowLoaded && !lastLoadedState && pendingFilterUrns.length > 0) {
+      ensureHotbarInit()
+      for (const urn of pendingFilterUrns) {
+        removeItemFromInventoryByUrn(urn)
+      }
+    }
+    lastLoadedState = nowLoaded
+  })
+
+  // Handle errors — also reject any pending drop
   room.onMessage('error', (data) => {
     console.log('[Client] Error:', data.message)
+    rejectDrop()
+    showTxStatus('error', data.message)
   })
 
   // Bob + spin animation

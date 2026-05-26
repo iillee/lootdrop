@@ -7,8 +7,8 @@ import { DroppedItem, Rarity, ALL_RARITIES, MAX_DROPPED_ITEMS } from '../shared/
 let droppedItems: DroppedItem[] = []
 let nextId = 1
 
-// Track items currently being picked up (prevent double-claim)
-const pendingPickups = new Set<string>()
+const PICKUP_DISTANCE = 3
+const RESERVATION_TIMEOUT_MS = 90_000 // 90 seconds to complete claim tx
 
 // ── Setup ──
 
@@ -22,6 +22,7 @@ export async function setupServer(): Promise<void> {
     try { fn(dt) } catch (err) { console.error(`[Server] ❌ ${name} error:`, err) }
   }
   engine.addSystem(safe('playerSyncSystem', playerSyncSystem))
+  engine.addSystem(safe('reservationCleanup', reservationCleanupSystem))
 
   console.log('[Server] LootDrop server ready —', droppedItems.length, 'items loaded')
 }
@@ -30,14 +31,37 @@ export async function setupServer(): Promise<void> {
 
 async function loadItems(): Promise<void> {
   try {
-    const data = await Storage.get<string>('lootdrop:items')
+    const data = await Storage.get<string>('lootdrop:items:v2')
     if (data) {
       droppedItems = JSON.parse(data)
       for (const item of droppedItems) {
         const num = parseInt(item.id.replace('item-', ''))
         if (num >= nextId) nextId = num + 1
+        // Clear stale reservations on load
+        item.reservedBy = ''
+        item.reservedAt = 0
       }
-      console.log('[Server] Loaded', droppedItems.length, 'persisted items')
+      console.log('[Server] Loaded', droppedItems.length, 'persisted items (v2)')
+    } else {
+      // Try migrating from v1
+      const v1data = await Storage.get<string>('lootdrop:items')
+      if (v1data) {
+        const v1items: any[] = JSON.parse(v1data)
+        droppedItems = v1items.map(i => ({
+          ...i,
+          dropId: i.dropId ?? -1,
+          collection: i.collection ?? '',
+          tokenId: i.tokenId ?? '',
+          reservedBy: '',
+          reservedAt: 0
+        }))
+        for (const item of droppedItems) {
+          const num = parseInt(item.id.replace('item-', ''))
+          if (num >= nextId) nextId = num + 1
+        }
+        await saveItems()
+        console.log('[Server] Migrated', droppedItems.length, 'items from v1 to v2')
+      }
     }
   } catch (err) {
     console.error('[Server] Failed to load items:', err)
@@ -46,15 +70,13 @@ async function loadItems(): Promise<void> {
 
 async function saveItems(): Promise<void> {
   try {
-    await Storage.set('lootdrop:items', JSON.stringify(droppedItems))
+    await Storage.set('lootdrop:items:v2', JSON.stringify(droppedItems))
   } catch (err) {
     console.error('[Server] Failed to save items:', err)
   }
 }
 
 // ── Helpers ──
-
-const PICKUP_DISTANCE = 3
 
 function getPlayerPosition(address: string): { x: number; y: number; z: number } | null {
   for (const [entity, identity] of engine.getEntitiesWith(PlayerIdentityData)) {
@@ -77,7 +99,7 @@ function horizontalDistance(a: { x: number; z: number }, b: { x: number; z: numb
 
 function registerHandlers(): void {
 
-  // ── Mock Drop (no on-chain, for testing / guests) ──
+  // ── Drop ──
   room.onMessage('requestDrop', (data, context) => {
     if (!context) return
     const from = context.from
@@ -90,12 +112,22 @@ function registerHandlers(): void {
     const name = (data.name || '').trim()
     const rarity = ALL_RARITIES.includes(data.rarity as Rarity) ? data.rarity as Rarity : 'common'
     const urn = (data.urn || '').trim()
+    const thumbnail = (data.thumbnail || '').trim()
+    const dropId = data.dropId ?? -1
+    const collection = (data.collection || '').trim()
+    const tokenId = (data.tokenId || '').trim()
 
     if (!name || name.length > 100) {
       room.send('error', { message: 'Invalid item name.' }, { to: [from] })
       return
     }
 
+    // For real drops, require a valid on-chain dropId
+    if (urn && dropId < 0) {
+      room.send('error', { message: 'On-chain deposit required for real items.' }, { to: [from] })
+      return
+    }
+
     const pos = getPlayerPosition(from)
     const px = pos ? pos.x : 16
     const pz = pos ? pos.z : 16
@@ -105,78 +137,17 @@ function registerHandlers(): void {
       name,
       rarity,
       urn,
-      onChainDropId: '',
-      collection: '',
-      tokenId: '',
+      thumbnail,
       x: px,
       y: 1.2,
       z: pz,
       dropperId: from,
-      timestamp: Date.now()
-    }
-
-    droppedItems.push(item)
-    saveItems()
-
-    room.send('itemDropped', {
-      id: item.id,
-      name: item.name,
-      rarity: item.rarity,
-      x: item.x,
-      y: item.y,
-      z: item.z,
-      dropperId: item.dropperId,
-      onChainDropId: ''
-    })
-
-    console.log('[Server] Mock item dropped:', item.name, 'by', from.slice(0, 8))
-  })
-
-  // ── On-Chain Drop (client completed deposit, now place the item) ──
-  room.onMessage('confirmDrop', (data, context) => {
-    if (!context) return
-    const from = context.from
-
-    if (droppedItems.length >= MAX_DROPPED_ITEMS) {
-      room.send('error', { message: 'Drop zone is full!' }, { to: [from] })
-      return
-    }
-
-    const name = (data.name || '').trim()
-    const rarity = ALL_RARITIES.includes(data.rarity as Rarity) ? data.rarity as Rarity : 'common'
-    const urn = (data.urn || '').trim()
-    const onChainDropId = (data.onChainDropId || '').trim()
-    const collection = (data.collection || '').trim()
-    const tokenId = (data.tokenId || '').trim()
-
-    if (!name || !onChainDropId) {
-      room.send('error', { message: 'Invalid drop confirmation.' }, { to: [from] })
-      return
-    }
-
-    // Check for duplicate on-chain dropId
-    if (droppedItems.some(i => i.onChainDropId === onChainDropId && onChainDropId !== '')) {
-      room.send('error', { message: 'This drop has already been recorded.' }, { to: [from] })
-      return
-    }
-
-    const pos = getPlayerPosition(from)
-    const px = pos ? pos.x : 16
-    const pz = pos ? pos.z : 16
-
-    const item: DroppedItem = {
-      id: 'item-' + nextId++,
-      name,
-      rarity,
-      urn,
-      onChainDropId,
+      timestamp: Date.now(),
+      dropId,
       collection,
       tokenId,
-      x: px,
-      y: 1.2,
-      z: pz,
-      dropperId: from,
-      timestamp: Date.now()
+      reservedBy: '',
+      reservedAt: 0
     }
 
     droppedItems.push(item)
@@ -186,107 +157,144 @@ function registerHandlers(): void {
       id: item.id,
       name: item.name,
       rarity: item.rarity,
+      thumbnail: item.thumbnail,
       x: item.x,
       y: item.y,
       z: item.z,
       dropperId: item.dropperId,
-      onChainDropId: item.onChainDropId
+      dropId: item.dropId
     })
 
-    console.log('[Server] ⛓️ On-chain item dropped:', item.name, 'dropId:', onChainDropId, 'by', from.slice(0, 8))
+    const isOnChain = dropId >= 0 ? ' (on-chain #' + dropId + ')' : ' (mock)'
+    console.log('[Server] Item dropped:', item.name, 'by', from.slice(0, 8), isOnChain)
+
+    // Update dropper's filtered URN list
+    if (urn) {
+      const myDroppedUrns = droppedItems
+        .filter(i => i.dropperId.toLowerCase() === from.toLowerCase() && i.urn)
+        .map(i => i.urn)
+      room.send('droppedUrns', { urnsJson: JSON.stringify(myDroppedUrns) }, { to: [from] })
+    }
   })
 
-  // ── Pickup Request (server validates proximity, then tells client to claim on-chain) ──
+  // ── Pickup Request ──
+  // For mock items: instant pickup (no blockchain needed).
+  // For real items: reserve the item, send approvePickup, wait for confirmPickup.
   room.onMessage('requestPickup', (data, context) => {
     if (!context) return
     const from = context.from
     const itemId = data.itemId
 
-    const itemIndex = droppedItems.findIndex(i => i.id === itemId)
-    if (itemIndex === -1) {
+    const item = droppedItems.find(i => i.id === itemId)
+    if (!item) {
       room.send('error', { message: 'Item no longer exists.' }, { to: [from] })
       return
     }
 
-    const item = droppedItems[itemIndex]
-
-    // Check if someone else is already claiming this
-    if (pendingPickups.has(itemId)) {
+    // Check if already reserved by someone else
+    if (item.reservedBy && item.reservedBy.toLowerCase() !== from.toLowerCase()) {
       room.send('error', { message: 'Someone else is picking this up.' }, { to: [from] })
       return
     }
 
+    // Proximity check
     const playerPos = getPlayerPosition(from)
     if (!playerPos) {
       room.send('error', { message: 'Cannot verify your position.' }, { to: [from] })
       return
     }
-
     const dist = horizontalDistance(playerPos, { x: item.x, z: item.z })
     if (dist > PICKUP_DISTANCE) {
       room.send('error', { message: 'Too far away to pick up.' }, { to: [from] })
       return
     }
 
-    // If on-chain item, send approval and wait for client to confirm claim
-    if (item.onChainDropId) {
-      pendingPickups.add(itemId)
-      // Auto-expire the pending pickup after 60s (in case client never confirms)
-      setTimeout(() => { pendingPickups.delete(itemId) }, 60000)
-
-      room.send('approvePickup', {
-        itemId: item.id,
-        onChainDropId: item.onChainDropId
-      }, { to: [from] })
-
-      console.log('[Server] Approved pickup for', item.name, '— waiting for on-chain claim by', from.slice(0, 8))
+    // Mock items: instant pickup (no blockchain)
+    if (item.dropId < 0) {
+      finalizePickup(item, from)
       return
     }
 
-    // Mock item — instant pickup (no on-chain step)
-    droppedItems.splice(itemIndex, 1)
+    // Real items: reserve and send approvePickup
+    item.reservedBy = from
+    item.reservedAt = Date.now()
     saveItems()
 
-    room.send('itemPickedUp', {
-      id: item.id,
-      pickerId: from,
-      pickerName: from.slice(0, 8),
+    console.log('[Server] Reserved item', item.name, 'for', from.slice(0, 8), '— awaiting on-chain claim')
+
+    room.send('approvePickup', {
+      itemId: item.id,
+      dropId: item.dropId,
       itemName: item.name,
       rarity: item.rarity
-    })
-
-    console.log('[Server] Mock item picked up:', item.name, 'by', from.slice(0, 8))
+    }, { to: [from] })
   })
 
-  // ── Confirm Pickup (client completed on-chain claim) ──
+  // ── Confirm Pickup (after on-chain claim) ──
   room.onMessage('confirmPickup', (data, context) => {
     if (!context) return
     const from = context.from
     const itemId = data.itemId
 
-    const itemIndex = droppedItems.findIndex(i => i.id === itemId)
-    if (itemIndex === -1) {
+    const item = droppedItems.find(i => i.id === itemId)
+    if (!item) {
       room.send('error', { message: 'Item no longer exists.' }, { to: [from] })
       return
     }
 
-    const item = droppedItems[itemIndex]
+    // Verify this player had the reservation
+    if (item.reservedBy.toLowerCase() !== from.toLowerCase()) {
+      room.send('error', { message: 'You do not have a reservation for this item.' }, { to: [from] })
+      return
+    }
 
-    // Remove from pending and from world
-    pendingPickups.delete(itemId)
-    droppedItems.splice(itemIndex, 1)
-    saveItems()
-
-    room.send('itemPickedUp', {
-      id: item.id,
-      pickerId: from,
-      pickerName: from.slice(0, 8),
-      itemName: item.name,
-      rarity: item.rarity
-    })
-
-    console.log('[Server] ⛓️ On-chain item picked up:', item.name, 'by', from.slice(0, 8))
+    console.log('[Server] On-chain claim confirmed for', item.name, 'by', from.slice(0, 8), 'tx:', data.txHash)
+    finalizePickup(item, from)
   })
+}
+
+function finalizePickup(item: DroppedItem, pickerId: string): void {
+  const itemIndex = droppedItems.indexOf(item)
+  if (itemIndex === -1) return
+
+  droppedItems.splice(itemIndex, 1)
+  saveItems()
+
+  room.send('itemPickedUp', {
+    id: item.id,
+    pickerId,
+    pickerName: pickerId.slice(0, 8),
+    itemName: item.name,
+    rarity: item.rarity,
+    urn: item.urn,
+    thumbnail: item.thumbnail,
+    dropId: item.dropId,
+    collection: item.collection,
+    tokenId: item.tokenId
+  })
+
+  console.log('[Server] Item picked up:', item.name, 'by', pickerId.slice(0, 8))
+}
+
+// ── Reservation Cleanup ──
+
+let cleanupTimer = 0
+function reservationCleanupSystem(dt: number): void {
+  cleanupTimer += dt
+  if (cleanupTimer < 10) return // check every 10 seconds
+  cleanupTimer = 0
+
+  const now = Date.now()
+  for (const item of droppedItems) {
+    if (item.reservedBy && item.reservedAt > 0) {
+      if (now - item.reservedAt > RESERVATION_TIMEOUT_MS) {
+        console.log('[Server] Reservation expired for', item.name, '- unreserving')
+        item.reservedBy = ''
+        item.reservedAt = 0
+        saveItems()
+      }
+    }
+  }
 }
 
 // ── Player Sync ──
@@ -299,7 +307,19 @@ function playerSyncSystem(): void {
     if (!knownPlayers.has(addr)) {
       knownPlayers.add(addr)
       console.log('[Server] New player connected:', addr.slice(0, 8))
-      room.send('syncAll', { itemsJson: JSON.stringify(droppedItems) }, { to: [identity.address] })
+
+      // Send only non-reserved items (or items reserved by this player)
+      const visibleItems = droppedItems.filter(i =>
+        !i.reservedBy || i.reservedBy.toLowerCase() === addr
+      )
+      room.send('syncAll', { itemsJson: JSON.stringify(visibleItems) }, { to: [identity.address] })
+
+      const myDroppedUrns = droppedItems
+        .filter(i => i.dropperId.toLowerCase() === addr && i.urn)
+        .map(i => i.urn)
+      if (myDroppedUrns.length > 0) {
+        room.send('droppedUrns', { urnsJson: JSON.stringify(myDroppedUrns) }, { to: [identity.address] })
+      }
     }
   }
 }

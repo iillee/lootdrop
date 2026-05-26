@@ -3,6 +3,8 @@ import {
   Transform,
   TextShape,
   GltfContainer,
+  Material,
+  MeshRenderer,
   ColliderLayer,
   Entity,
   pointerEventsSystem,
@@ -30,9 +32,9 @@ const RARITY_TEXT_COLOR: Record<string, Color4> = {
 interface RenderedItem {
   entity: Entity
   label: Entity
+  thumb: Entity | null
   baseY: number
   offset: number
-  onChainDropId: string
 }
 
 const renderedItems = new Map<string, RenderedItem>()
@@ -40,7 +42,7 @@ let itemCount = 0
 
 // ── Public API ──
 
-export function spawnItemCard(id: string, name: string, rarity: Rarity, x: number, y: number, z: number, onChainDropId: string = ''): void {
+export function spawnItemCard(id: string, name: string, rarity: Rarity, x: number, y: number, z: number, thumbnail: string = ''): void {
   if (renderedItems.has(id)) return // already rendered
 
   const entity = engine.addEntity()
@@ -68,14 +70,35 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
     width: 0.8
   })
 
-  // Pointer event — pick up on E press
+  // Thumbnail image plane (if available)
+  let thumbEntity: Entity | null = null
+  if (thumbnail) {
+    thumbEntity = engine.addEntity()
+    Transform.create(thumbEntity, {
+      position: Vector3.create(0, 0.08, 0.005),
+      scale: Vector3.create(0.45, 0.45, 1),
+      parent: entity
+    })
+    MeshRenderer.setPlane(thumbEntity)
+    Material.setPbrMaterial(thumbEntity, {
+      texture: Material.Texture.Common({ src: thumbnail }),
+      emissiveTexture: Material.Texture.Common({ src: thumbnail }),
+      emissiveIntensity: 0.6,
+      emissiveColor: Color4.White(),
+      roughness: 1,
+      specularIntensity: 0,
+      metallic: 0
+    })
+  }
+
+  // Pointer event — pick up on E press or left-click
   pointerEventsSystem.onPointerDown(
     {
       entity,
       opts: {
         button: InputAction.IA_PRIMARY,
-        hoverText: 'Pick up ' + name,
-        maxDistance: 4
+        hoverText: '[E] Pick up ' + name,
+        maxDistance: 5
       }
     },
     () => {
@@ -87,9 +110,9 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
   renderedItems.set(id, {
     entity,
     label: labelFront,
+    thumb: thumbEntity,
     baseY: y,
-    offset: itemCount++ * 1.5,
-    onChainDropId
+    offset: itemCount++ * 1.5
   })
 }
 
@@ -97,6 +120,7 @@ export function removeItemCard(id: string): void {
   const item = renderedItems.get(id)
   if (!item) return
   pointerEventsSystem.removeOnPointerDown(item.entity)
+  if (item.thumb) engine.removeEntity(item.thumb)
   engine.removeEntity(item.label)
   engine.removeEntity(item.entity)
   renderedItems.delete(id)
@@ -114,8 +138,8 @@ export function itemAnimationSystem(dt: number): void {
   animTime += dt
   for (const [_id, item] of renderedItems) {
     const transform = Transform.getMutable(item.entity)
-    transform.position.y = item.baseY + Math.sin(animTime * 2 + item.offset) * 0.15
-    transform.rotation = Quaternion.fromEulerDegrees(0, animTime * 30 + item.offset * 60, 0)
+    transform.position.y = item.baseY + Math.sin(animTime * 1.5 + item.offset) * 0.1
+    transform.rotation = Quaternion.fromEulerDegrees(0, animTime * 15 + item.offset * 60, 0)
   }
 }
 

@@ -68,6 +68,16 @@ const LootDropUI = () => {
       {/* Drop confirmation modal */}
       {showDropConfirm && <DropConfirmModal />}
 
+      {/* Network banner */}
+      <UiEntity uiTransform={{
+        positionType: 'absolute',
+        position: { top: 10 },
+        width: '100%', height: 24,
+        justifyContent: 'center', alignItems: 'center',
+      }}>
+        <Label value="⛓️ POLYGON — Real NFT escrow active" fontSize={12} color={Color4.create(0.5, 0.85, 1, 0.7)} textAlign="middle-center" uiTransform={{ width: 300, height: 24 }} />
+      </UiEntity>
+
       {/* Pickup notification */}
       {showNotification && (
         <UiEntity uiTransform={{

@@ -1,17 +1,18 @@
-/** Modal dialog confirming an item drop — shows item preview, rarity, and confirm/cancel. */
+/** Modal dialog confirming an item drop — shows item preview, rarity, and blockchain warning. */
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { rarityColor } from './colors'
-import { dropConfirmItem, closeDropConfirm, confirmDrop } from './state'
+import { dropConfirmItem, closeDropConfirm, confirmDrop, dropInProgress } from './state'
 
 const ICON_SIZE = 128
-const MODAL_WIDTH = 280
-const CONTENT_WIDTH = 240
-const BUTTON_WIDTH = 200
+const MODAL_WIDTH = 300
+const CONTENT_WIDTH = 260
+const BUTTON_WIDTH = 220
 
 export const DropConfirmModal = () => {
   if (!dropConfirmItem) return null
   const w = dropConfirmItem
+  const isReal = !!(w.urn && w.collection && w.tokenId)
 
   return (
     <UiEntity uiTransform={{
@@ -71,35 +72,73 @@ export const DropConfirmModal = () => {
           />
         </UiEntity>
 
-        {/* Confirmation text */}
-        <Label
-          value="Are you sure you want" fontSize={14}
-          color={Color4.create(0.7, 0.7, 0.75, 1)}
-          textAlign="middle-center" uiTransform={{ width: CONTENT_WIDTH, height: 18 }}
-        />
-        <Label
-          value="to drop this item?" fontSize={14}
-          color={Color4.create(0.7, 0.7, 0.75, 1)}
-          textAlign="middle-center" uiTransform={{ width: CONTENT_WIDTH, height: 18, margin: { bottom: 16 } }}
-        />
+        {/* Blockchain info */}
+        {isReal ? (
+          <UiEntity uiTransform={{ width: CONTENT_WIDTH, flexDirection: 'column', alignItems: 'center', margin: { bottom: 14 } }}>
+            <Label
+              value="⛓️ ON-CHAIN DROP" fontSize={12}
+              color={Color4.create(1, 0.7, 0.2, 1)}
+              textAlign="middle-center" uiTransform={{ width: CONTENT_WIDTH, height: 18 }}
+            />
+            <Label
+              value="Your NFT will be transferred to" fontSize={11}
+              color={Color4.create(0.6, 0.6, 0.65, 1)}
+              textAlign="middle-center" uiTransform={{ width: CONTENT_WIDTH, height: 16 }}
+            />
+            <Label
+              value="the escrow contract on Polygon." fontSize={11}
+              color={Color4.create(0.6, 0.6, 0.65, 1)}
+              textAlign="middle-center" uiTransform={{ width: CONTENT_WIDTH, height: 16 }}
+            />
+            <Label
+              value="You will sign 2 transactions." fontSize={11}
+              color={Color4.create(0.6, 0.6, 0.65, 1)}
+              textAlign="middle-center" uiTransform={{ width: CONTENT_WIDTH, height: 16, margin: { top: 2 } }}
+            />
+          </UiEntity>
+        ) : (
+          <UiEntity uiTransform={{ width: CONTENT_WIDTH, margin: { bottom: 14 } }}>
+            <Label
+              value="Are you sure you want to drop this item?" fontSize={14}
+              color={Color4.create(0.7, 0.7, 0.75, 1)}
+              textAlign="middle-center" textWrap="wrap"
+              uiTransform={{ width: CONTENT_WIDTH, height: 36 }}
+            />
+          </UiEntity>
+        )}
 
         {/* Drop button */}
-        <UiEntity
-          uiTransform={{ width: BUTTON_WIDTH, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center', margin: { bottom: 8 } }}
-          uiBackground={{ color: Color4.create(0.85, 0.2, 0.2, 1) }}
-          onMouseDown={() => { confirmDrop() }}
-        >
-          <Label value="DROP ITEM" fontSize={14} color={Color4.White()} textAlign="middle-center" uiTransform={{ width: BUTTON_WIDTH, height: 36 }} />
-        </UiEntity>
+        {!dropInProgress ? (
+          <UiEntity
+            uiTransform={{ width: BUTTON_WIDTH, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center', margin: { bottom: 8 } }}
+            uiBackground={{ color: isReal ? Color4.create(0.85, 0.5, 0.1, 1) : Color4.create(0.85, 0.2, 0.2, 1) }}
+            onMouseDown={() => { confirmDrop() }}
+          >
+            <Label
+              value={isReal ? '⛓️ APPROVE & DROP' : 'DROP ITEM'}
+              fontSize={14} color={Color4.White()} textAlign="middle-center"
+              uiTransform={{ width: BUTTON_WIDTH, height: 36 }}
+            />
+          </UiEntity>
+        ) : (
+          <UiEntity
+            uiTransform={{ width: BUTTON_WIDTH, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center', margin: { bottom: 8 } }}
+            uiBackground={{ color: Color4.create(0.3, 0.3, 0.35, 0.8) }}
+          >
+            <Label value="⏳ Waiting for wallet..." fontSize={14} color={Color4.create(1, 0.85, 0.3, 1)} textAlign="middle-center" uiTransform={{ width: BUTTON_WIDTH, height: 36 }} />
+          </UiEntity>
+        )}
 
         {/* Cancel button */}
-        <UiEntity
-          uiTransform={{ width: BUTTON_WIDTH, height: 32, borderRadius: 10, justifyContent: 'center', alignItems: 'center' }}
-          uiBackground={{ color: Color4.create(0.15, 0.15, 0.18, 0.9) }}
-          onMouseDown={() => { closeDropConfirm() }}
-        >
-          <Label value="Cancel" fontSize={13} color={Color4.create(0.6, 0.6, 0.65, 1)} textAlign="middle-center" uiTransform={{ width: BUTTON_WIDTH, height: 32 }} />
-        </UiEntity>
+        {!dropInProgress && (
+          <UiEntity
+            uiTransform={{ width: BUTTON_WIDTH, height: 32, borderRadius: 10, justifyContent: 'center', alignItems: 'center' }}
+            uiBackground={{ color: Color4.create(0.15, 0.15, 0.18, 0.9) }}
+            onMouseDown={() => { closeDropConfirm() }}
+          >
+            <Label value="Cancel" fontSize={13} color={Color4.create(0.6, 0.6, 0.65, 1)} textAlign="middle-center" uiTransform={{ width: BUTTON_WIDTH, height: 32 }} />
+          </UiEntity>
+        )}
       </UiEntity>
     </UiEntity>
   )

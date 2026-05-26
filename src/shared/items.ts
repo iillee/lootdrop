@@ -9,14 +9,17 @@ export interface DroppedItem {
   name: string
   rarity: Rarity
   urn: string              // wearable URN (empty string for mock items)
-  onChainDropId: string    // escrow contract dropId (empty for mock/non-chain drops)
-  collection: string       // ERC-721 contract address (empty for mock)
-  tokenId: string          // on-chain tokenId (empty for mock)
+  thumbnail: string        // thumbnail image URL (empty for mock items)
   x: number
   y: number
   z: number
   dropperId: string
   timestamp: number
+  dropId: number           // on-chain escrow dropId (-1 = mock/off-chain)
+  collection: string       // collection contract address (empty for mock)
+  tokenId: string          // ERC-721 tokenId (empty for mock)
+  reservedBy: string       // address of player currently claiming (empty = available)
+  reservedAt: number       // timestamp of reservation (0 = not reserved)
 }
 
 /** Wearable info as returned by the inventory fetch. */
@@ -26,6 +29,8 @@ export interface OwnedWearable {
   rarity: Rarity
   category: string
   thumbnail: string
+  collection: string       // collection contract address (empty for mock)
+  tokenId: string          // ERC-721 tokenId (empty for mock)
 }
 
 /** Mock item pool — used as fallback when wallet wearables can't be fetched. */

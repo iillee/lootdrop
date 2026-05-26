@@ -1,25 +1,25 @@
 /**
- * blockchain.ts — Handles on-chain escrow interactions for real wearable transfers.
- * Only supports Polygon (Matic) collections-v2 wearables.
+ * blockchain.ts — Real Polygon escrow interaction for LootDrop.
+ *
+ * DROP:   approve(collection, tokenId) → deposit(collection, tokenId) → dropId
+ * PICKUP: claim(dropId) → NFT transfers to caller
+ *
+ * Requires the player's wallet on Polygon PoS network.
  */
 
-import { executeTask } from '@dcl/sdk/ecs'
 import { createEthereumProvider } from '@dcl/sdk/ethereum-provider'
 import { RequestManager, ContractFactory } from 'eth-connect'
 import { getPlayer } from '@dcl/sdk/src/players'
-import { ESCROW_ABI, ERC721_APPROVE_ABI } from '../shared/escrowAbi'
 import { ESCROW_ADDRESS } from '../shared/contracts'
-
-// ── Polygon chain config ──
-
-const POLYGON_CHAIN_ID = '0x89' // 137
+import { ESCROW_ABI, ERC721_APPROVE_ABI } from '../shared/escrowAbi'
 
 // ── State ──
 
 let requestManager: RequestManager | null = null
+let escrowContract: any = null
 let playerAddress = ''
 
-export type TxStatus = 'idle' | 'switching-chain' | 'approving' | 'depositing' | 'claiming' | 'confirmed' | 'error'
+export type TxStatus = 'idle' | 'approving' | 'depositing' | 'claiming' | 'confirmed' | 'error'
 let currentStatus: TxStatus = 'idle'
 let currentError = ''
 
@@ -38,243 +38,162 @@ async function ensureProvider(): Promise<RequestManager> {
   return requestManager
 }
 
+async function getEscrowContract(): Promise<any> {
+  if (escrowContract) return escrowContract
+  const rm = await ensureProvider()
+  const factory = new ContractFactory(rm, ESCROW_ABI)
+  escrowContract = await factory.at(ESCROW_ADDRESS)
+  return escrowContract
+}
+
+async function getErc721Contract(collectionAddress: string): Promise<any> {
+  const rm = await ensureProvider()
+  const factory = new ContractFactory(rm, ERC721_APPROVE_ABI)
+  return factory.at(collectionAddress)
+}
+
 // ── URN Parsing ──
 
 export interface ParsedUrn {
   chain: 'matic' | 'ethereum'
   collection: string
-  itemId: number
+  itemId: string
 }
 
-/**
- * Parse a DCL wearable URN into chain, collection address, and itemId.
- * Only Polygon (matic) collections-v2 are supported for transfers.
- */
 export function parseWearableUrn(urn: string): ParsedUrn | null {
-  // Matic v2: urn:decentraland:matic:collections-v2:0x1234...:3
-  const maticMatch = urn.match(/^urn:decentraland:matic:collections-v2:(0x[a-fA-F0-9]+):(\d+)$/)
+  const maticMatch = urn.match(/^urn:decentraland:matic:collections-v2:(0x[a-fA-F0-9]+):(\d+)/)
   if (maticMatch) {
-    return { chain: 'matic', collection: maticMatch[1], itemId: parseInt(maticMatch[2]) }
-  }
-  // Ethereum v1: urn:decentraland:ethereum:collections-v1:collection_name:item_name
-  // Not supported for on-chain transfer (different chain than our escrow contract)
-  return null
-}
-
-// ── Token ID Resolution ──
-// DCL collections-v2 encode tokenId as (itemId << 216) | issuedId
-// We enumerate the owner's tokens and find one matching the desired itemId.
-
-const ITEM_ID_SHIFT = 216n
-
-function extractItemId(tokenId: bigint): number {
-  return Number(tokenId >> ITEM_ID_SHIFT)
-}
-
-/**
- * Find the actual on-chain tokenId for a specific itemId owned by the player.
- */
-async function resolveTokenId(rm: RequestManager, collection: string, itemId: number): Promise<string | null> {
-  const factory = new ContractFactory(rm, [
-    {
-      inputs: [{ name: 'owner', type: 'address' }],
-      name: 'balanceOf',
-      outputs: [{ name: '', type: 'uint256' }],
-      stateMutability: 'view',
-      type: 'function'
-    },
-    {
-      inputs: [{ name: 'owner', type: 'address' }, { name: 'index', type: 'uint256' }],
-      name: 'tokenOfOwnerByIndex',
-      outputs: [{ name: '', type: 'uint256' }],
-      stateMutability: 'view',
-      type: 'function'
-    }
-  ] as any)
-  const contract = await factory.at(collection) as any
-
-  const balance = await contract.balanceOf(playerAddress)
-  const count = typeof balance === 'bigint' ? Number(balance) : parseInt(balance.toString())
-
-  for (let i = 0; i < count; i++) {
-    const tokenId = await contract.tokenOfOwnerByIndex(playerAddress, i)
-    const tokenBig = typeof tokenId === 'bigint' ? tokenId : BigInt(tokenId.toString())
-    if (extractItemId(tokenBig) === itemId) {
-      return tokenId.toString()
-    }
+    return { chain: 'matic', collection: maticMatch[1], itemId: maticMatch[2] }
   }
   return null
 }
 
-// ── Drop Flow: Approve + Deposit ──
+// ── Drop: Approve + Deposit ──
+
+export interface DropResult {
+  success: boolean
+  dropId: number
+  error?: string
+}
 
 /**
- * Execute the full drop flow:
- * 1. Switch to Polygon (if needed)
- * 2. Approve escrow contract for the specific token
- * 3. Call deposit on escrow
- * Returns the on-chain dropId, or null on failure.
+ * Approve the escrow contract to transfer the NFT, then deposit it.
+ * The player will be prompted to sign two transactions.
+ *
+ * @returns The on-chain dropId on success.
  */
-export function executeDeposit(
-  collection: string,
-  itemId: number,
-  onComplete: (onChainDropId: string) => void,
-  onError: (error: string) => void
-): void {
-  currentStatus = 'switching-chain'
-  currentError = ''
+export async function approveAndDeposit(collection: string, tokenId: string): Promise<DropResult> {
+  try {
+    await ensureProvider()
+    if (!playerAddress) {
+      return { success: false, dropId: -1, error: 'No wallet connected' }
+    }
 
-  executeTask(async () => {
-    try {
-      const rm = await ensureProvider()
+    const gasPrice = await requestManager!.eth_gasPrice()
+    const txOpts = { from: playerAddress, gas: 200000, gasPrice }
 
-      // Step 1: Switch to Polygon
-      try {
-        await (rm as any).provider.send('wallet_switchEthereumChain', [{ chainId: POLYGON_CHAIN_ID }])
-      } catch (switchErr: any) {
-        // Chain not added — try adding it
-        if (switchErr?.code === 4902) {
-          await (rm as any).provider.send('wallet_addEthereumChain', [{
-            chainId: POLYGON_CHAIN_ID,
-            chainName: 'Polygon Mainnet',
-            nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
-            rpcUrls: ['https://polygon-rpc.com'],
-            blockExplorerUrls: ['https://polygonscan.com']
-          }])
-        }
-        // If user rejected, the error will propagate
-      }
+    // Step 1: Check if already approved
+    currentStatus = 'approving'
+    console.log('[Blockchain] Checking approval for token', tokenId, 'on', collection)
 
-      // Step 2: Resolve tokenId
-      currentStatus = 'approving'
-      console.log('[Blockchain] Resolving tokenId for item', itemId, 'in', collection)
-      const tokenId = await resolveTokenId(rm, collection, itemId)
-      if (!tokenId) {
-        throw new Error('Could not find this wearable in your wallet')
-      }
-      console.log('[Blockchain] Found tokenId:', tokenId)
+    const erc721 = await getErc721Contract(collection)
+    const approved: string = await erc721.getApproved(tokenId)
 
-      // Step 3: Approve escrow contract
+    if (approved.toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) {
       console.log('[Blockchain] Requesting approval...')
-      const approveFactory = new ContractFactory(rm, ERC721_APPROVE_ABI as any)
-      const nftContract = await approveFactory.at(collection) as any
-      await nftContract.approve(ESCROW_ADDRESS, tokenId, { from: playerAddress })
-      console.log('[Blockchain] Approval confirmed')
+      const approveTx = await erc721.approve(ESCROW_ADDRESS, tokenId, txOpts)
+      console.log('[Blockchain] Approve tx:', approveTx)
 
-      // Step 4: Deposit into escrow
-      currentStatus = 'depositing'
-      console.log('[Blockchain] Depositing into escrow...')
-      const escrowFactory = new ContractFactory(rm, ESCROW_ABI as any)
-      const escrow = await escrowFactory.at(ESCROW_ADDRESS) as any
-      const tx = await escrow.deposit(collection, tokenId, { from: playerAddress })
-      console.log('[Blockchain] Deposit tx:', tx)
-
-      // Step 5: Get the dropId from the transaction receipt/events
-      // For now, read nextDropId - 1 as our dropId (since we just incremented it)
-      const nextId = await escrow.nextDropId()
-      const onChainDropId = (parseInt(nextId.toString()) - 1).toString()
-      console.log('[Blockchain] On-chain dropId:', onChainDropId)
-
-      currentStatus = 'confirmed'
-      onComplete(onChainDropId)
-    } catch (err: any) {
-      console.error('[Blockchain] Deposit failed:', err)
-      currentStatus = 'error'
-      currentError = err?.message || 'Transaction failed'
-      onError(currentError)
+      // Wait a moment for the approval to propagate
+      await delay(3000)
+    } else {
+      console.log('[Blockchain] Already approved')
     }
-  })
+
+    // Step 2: Deposit into escrow
+    currentStatus = 'depositing'
+    console.log('[Blockchain] Depositing token', tokenId, 'from collection', collection)
+
+    const escrow = await getEscrowContract()
+    const depositTx = await escrow.deposit(collection, tokenId, txOpts)
+    console.log('[Blockchain] Deposit tx:', depositTx)
+
+    // Read the dropId from the contract (nextDropId - 1)
+    // Since we just deposited, the latest dropId is nextDropId - 1
+    await delay(5000) // wait for tx confirmation
+    const nextId: string = await escrow.nextDropId()
+    const dropId = parseInt(nextId) - 1
+
+    console.log('[Blockchain] ✅ Deposited! dropId =', dropId)
+    currentStatus = 'confirmed'
+    return { success: true, dropId }
+
+  } catch (err: any) {
+    console.error('[Blockchain] Drop failed:', err)
+    currentStatus = 'error'
+    currentError = err.message || 'Transaction failed'
+    return { success: false, dropId: -1, error: currentError }
+  }
 }
 
-// ── Pickup Flow: Claim ──
+// ── Pickup: Claim ──
+
+export interface ClaimResult {
+  success: boolean
+  txHash: string
+  error?: string
+}
 
 /**
- * Call claim on the escrow contract to receive the NFT.
+ * Claim a dropped item from the escrow contract.
+ * The NFT transfers to the caller.
  */
-export function executeClaim(
-  onChainDropId: string,
-  onComplete: () => void,
-  onError: (error: string) => void
-): void {
-  currentStatus = 'switching-chain'
-  currentError = ''
-
-  executeTask(async () => {
-    try {
-      const rm = await ensureProvider()
-
-      // Switch to Polygon
-      try {
-        await (rm as any).provider.send('wallet_switchEthereumChain', [{ chainId: POLYGON_CHAIN_ID }])
-      } catch (switchErr: any) {
-        if (switchErr?.code === 4902) {
-          await (rm as any).provider.send('wallet_addEthereumChain', [{
-            chainId: POLYGON_CHAIN_ID,
-            chainName: 'Polygon Mainnet',
-            nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
-            rpcUrls: ['https://polygon-rpc.com'],
-            blockExplorerUrls: ['https://polygonscan.com']
-          }])
-        }
-      }
-
-      // Claim
-      currentStatus = 'claiming'
-      console.log('[Blockchain] Claiming drop', onChainDropId)
-      const escrowFactory = new ContractFactory(rm, ESCROW_ABI as any)
-      const escrow = await escrowFactory.at(ESCROW_ADDRESS) as any
-      await escrow.claim(parseInt(onChainDropId), { from: playerAddress })
-      console.log('[Blockchain] Claim confirmed!')
-
-      currentStatus = 'confirmed'
-      onComplete()
-    } catch (err: any) {
-      console.error('[Blockchain] Claim failed:', err)
-      currentStatus = 'error'
-      currentError = err?.message || 'Transaction failed'
-      onError(currentError)
+export async function claimDrop(dropId: number): Promise<ClaimResult> {
+  try {
+    await ensureProvider()
+    if (!playerAddress) {
+      return { success: false, txHash: '', error: 'No wallet connected' }
     }
-  })
+
+    currentStatus = 'claiming'
+    console.log('[Blockchain] Claiming dropId', dropId)
+
+    const gasPrice = await requestManager!.eth_gasPrice()
+    const escrow = await getEscrowContract()
+    const txHash = await escrow.claim(dropId, {
+      from: playerAddress,
+      gas: 200000,
+      gasPrice
+    })
+
+    console.log('[Blockchain] ✅ Claimed! tx:', txHash)
+    currentStatus = 'confirmed'
+    return { success: true, txHash }
+
+  } catch (err: any) {
+    console.error('[Blockchain] Claim failed:', err)
+    currentStatus = 'error'
+    currentError = err.message || 'Transaction failed'
+    return { success: false, txHash: '', error: currentError }
+  }
 }
 
-// ── Withdraw Flow: Dropper reclaims ──
+// ── Helpers ──
 
-export function executeWithdraw(
-  onChainDropId: string,
-  onComplete: () => void,
-  onError: (error: string) => void
-): void {
-  currentStatus = 'switching-chain'
-  currentError = ''
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
-  executeTask(async () => {
-    try {
-      const rm = await ensureProvider()
-      try {
-        await (rm as any).provider.send('wallet_switchEthereumChain', [{ chainId: POLYGON_CHAIN_ID }])
-      } catch (switchErr: any) {
-        if (switchErr?.code === 4902) {
-          await (rm as any).provider.send('wallet_addEthereumChain', [{
-            chainId: POLYGON_CHAIN_ID,
-            chainName: 'Polygon Mainnet',
-            nativeCurrency: { name: 'POL', symbol: 'POL', decimals: 18 },
-            rpcUrls: ['https://polygon-rpc.com'],
-            blockExplorerUrls: ['https://polygonscan.com']
-          }])
-        }
-      }
-
-      currentStatus = 'claiming' // reuse status
-      const escrowFactory = new ContractFactory(rm, ESCROW_ABI as any)
-      const escrow = await escrowFactory.at(ESCROW_ADDRESS) as any
-      await escrow.withdraw(parseInt(onChainDropId), { from: playerAddress })
-
-      currentStatus = 'confirmed'
-      onComplete()
-    } catch (err: any) {
-      currentStatus = 'error'
-      currentError = err?.message || 'Transaction failed'
-      onError(currentError)
-    }
-  })
+/**
+ * Check if the player is on Polygon network.
+ */
+export async function checkNetwork(): Promise<boolean> {
+  try {
+    const rm = await ensureProvider()
+    const chainId = await (rm as any).net_version()
+    // Polygon PoS mainnet = 137
+    return chainId === '137' || chainId === 137
+  } catch {
+    return false
+  }
 }

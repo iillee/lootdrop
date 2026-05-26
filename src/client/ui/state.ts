@@ -3,12 +3,12 @@
  * Components read/write through exported functions and variables.
  */
 import { Color4 } from '@dcl/sdk/math'
+import { executeTask } from '@dcl/sdk/ecs'
 import { isStateSyncronized } from '@dcl/sdk/network'
-import { getRealm } from '~system/Runtime'
 import { room } from '../../shared/messages'
 import { Rarity, OwnedWearable } from '../../shared/items'
 import { getWearables, isLoading, isLoaded, fetchWearables } from '../inventory'
-import { parseWearableUrn, executeDeposit, TxStatus } from '../blockchain'
+import { approveAndDeposit, checkNetwork } from '../blockchain'
 import {
   HOTBAR_SLOTS, GRID_COLS, GRID_ROWS,
   DROP_COOLDOWN_MS, NOTIFICATION_DURATION_MS
@@ -105,9 +105,27 @@ export function toggleInventory(): void {
   clearSelection()
 }
 
+/** Remove an item by URN (used when server tells us we've already dropped it). */
+export function removeItemFromInventoryByUrn(urn: string): void {
+  if (!urn) return
+  for (let i = 0; i < hotbar.length; i++) {
+    if (hotbar[i] && hotbar[i]!.urn === urn) {
+      hotbar[i] = null
+      console.log('[UI] Removed dropped item from hotbar slot', i)
+      return
+    }
+  }
+  for (let i = 0; i < inventory.length; i++) {
+    if (inventory[i] && inventory[i]!.urn === urn) {
+      inventory[i] = null
+      console.log('[UI] Removed dropped item from inventory slot', i)
+      return
+    }
+  }
+}
+
 /** Add a picked-up item to the first empty hotbar slot, or inventory if hotbar is full. */
 export function addItemToInventory(w: OwnedWearable): void {
-  // Try hotbar first
   for (let i = 0; i < hotbar.length; i++) {
     if (!hotbar[i]) {
       hotbar[i] = w
@@ -115,7 +133,6 @@ export function addItemToInventory(w: OwnedWearable): void {
       return
     }
   }
-  // Try inventory
   for (let i = 0; i < inventory.length; i++) {
     if (!inventory[i]) {
       inventory[i] = w
@@ -123,7 +140,6 @@ export function addItemToInventory(w: OwnedWearable): void {
       return
     }
   }
-  // Append to inventory
   inventory.push(w)
   console.log('[UI] Added', w.name, 'to end of inventory')
 }
@@ -138,6 +154,7 @@ export function setGridScrollOffset(v: number): void { gridScrollOffset = v }
 export let showDropConfirm = false
 export let dropConfirmItem: OwnedWearable | null = null
 export let dropConfirmSlot = -1
+export let dropInProgress = false
 
 export function openDropConfirm(w: OwnedWearable, hotbarIdx: number): void {
   dropConfirmItem = w
@@ -146,84 +163,105 @@ export function openDropConfirm(w: OwnedWearable, hotbarIdx: number): void {
 }
 
 export function closeDropConfirm(): void {
+  if (dropInProgress) return // don't close while tx is pending
   showDropConfirm = false
   dropConfirmItem = null
   dropConfirmSlot = -1
 }
 
 export function confirmDrop(): void {
-  if (!dropConfirmItem) return
-  handleDropItem(dropConfirmItem)
-  if (dropConfirmSlot >= 0) hotbar[dropConfirmSlot] = null
-  clearSelection()
-  closeDropConfirm()
-}
+  if (!dropConfirmItem || dropInProgress) return
+  const w = dropConfirmItem
+  const slotIdx = dropConfirmSlot
 
-// ═══════════════════════════════════════════
-// Drop logic
-// ═══════════════════════════════════════════
-
-let lastDropTime = 0
-let cachedIsPreview: boolean | null = null
-
-async function checkIsPreview(): Promise<boolean> {
-  if (cachedIsPreview !== null) return cachedIsPreview
-  try {
-    const realm = await getRealm({})
-    cachedIsPreview = realm.realmInfo?.isPreview ?? false
-  } catch {
-    cachedIsPreview = false
-  }
-  return cachedIsPreview
-}
-
-function handleDropItem(w: OwnedWearable): void {
   if (!isStateSyncronized()) return
   const now = Date.now()
   if (now - lastDropTime < DROP_COOLDOWN_MS) return
   lastDropTime = now
-  showInventory = false
 
-  const parsed = parseWearableUrn(w.urn)
-
-  if (parsed && parsed.chain === 'matic') {
-    // Check if we're in preview — skip on-chain flow
-    checkIsPreview().then((preview) => {
-      if (preview) {
-        console.log('[Drop] Preview mode — skipping on-chain deposit, using mock drop')
-        room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
-        return
-      }
-      _executeOnChainDrop(w, parsed)
+  // Mock items (no URN): drop immediately, no blockchain
+  if (!w.urn) {
+    console.log('[UI] Mock drop — no blockchain needed')
+    pendingDropSlot = slotIdx
+    room.send('requestDrop', {
+      name: w.name, rarity: w.rarity, urn: '',
+      thumbnail: w.thumbnail || '', dropId: -1,
+      collection: '', tokenId: ''
     })
+    clearSelection()
+    showDropConfirm = false
+    dropConfirmItem = null
+    dropConfirmSlot = -1
+    showInventory = false
     return
   }
 
-  room.send('requestDrop', { name: w.name, rarity: w.rarity, urn: w.urn })
+  // Real item but missing tokenId — can't do on-chain deposit
+  if (!w.collection || !w.tokenId) {
+    showTxStatus('error', 'Missing token data — try reopening inventory')
+    console.error('[UI] Real item missing blockchain data:', w.urn, 'collection:', w.collection, 'tokenId:', w.tokenId)
+    return
+  }
+
+  // Real item: on-chain approve + deposit flow
+  dropInProgress = true
+  showTxStatus('⛓️ Approve NFT transfer in your wallet...')
+
+  executeTask(async () => {
+    try {
+      const result = await approveAndDeposit(w.collection, w.tokenId)
+
+      if (result.success) {
+        showTxStatus('confirmed')
+        console.log('[UI] On-chain deposit success, dropId:', result.dropId)
+
+        pendingDropSlot = slotIdx
+        room.send('requestDrop', {
+          name: w.name, rarity: w.rarity, urn: w.urn,
+          thumbnail: w.thumbnail || '', dropId: result.dropId,
+          collection: w.collection, tokenId: w.tokenId
+        })
+
+        clearSelection()
+        showDropConfirm = false
+        dropConfirmItem = null
+        dropConfirmSlot = -1
+        showInventory = false
+      } else {
+        showTxStatus('error', result.error || 'Deposit failed')
+      }
+    } catch (err: any) {
+      showTxStatus('error', err.message || 'Transaction failed')
+    } finally {
+      dropInProgress = false
+    }
+  })
 }
 
-function _executeOnChainDrop(w: OwnedWearable, parsed: { collection: string; itemId: number }): void {
-  showTxStatus('approving')
-  executeDeposit(
-    parsed.collection,
-    parsed.itemId,
-    (onChainDropId) => {
-      showTxStatus('confirmed')
-      room.send('confirmDrop', {
-        name: w.name,
-        rarity: w.rarity,
-        urn: w.urn,
-        onChainDropId,
-        collection: parsed.collection,
-        tokenId: ''
-      })
-      setTimeout(() => showTxStatus('idle'), 3000)
-    },
-    (error) => {
-      showTxStatus('error', error)
-      setTimeout(() => showTxStatus('idle'), 5000)
-    }
-  )
+// ═══════════════════════════════════════════
+// Drop timing & pending confirmation
+// ═══════════════════════════════════════════
+
+let lastDropTime = 0
+
+/** Hotbar slot waiting for server confirmation. Cleared on itemDropped or error. */
+export let pendingDropSlot = -1
+
+/** Called when server confirms the drop — NOW remove from hotbar. */
+export function confirmDropFromServer(): void {
+  if (pendingDropSlot >= 0) {
+    hotbar[pendingDropSlot] = null
+    console.log('[UI] Server confirmed drop — cleared hotbar slot', pendingDropSlot)
+    pendingDropSlot = -1
+  }
+}
+
+/** Called when server rejects the drop — keep the item. */
+export function rejectDrop(): void {
+  if (pendingDropSlot >= 0) {
+    console.log('[UI] Server rejected drop — keeping hotbar slot', pendingDropSlot)
+    pendingDropSlot = -1
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -234,36 +272,27 @@ export let txStatusText = ''
 export let txStatusColor = Color4.White()
 export let txStatusUntil = 0
 
-const TX_STATUS_MESSAGES: Record<string, string> = {
-  idle:             '',
-  'switching-chain': '⛓️ Switching to Polygon...',
-  approving:        '✍️ Approve the transaction in your wallet...',
-  depositing:       '📦 Depositing into escrow...',
-  claiming:         '🎁 Claiming from escrow...',
-  confirmed:        '✅ Transaction confirmed!',
-  error:            '❌ Transaction failed',
-}
-
-export function showTxStatus(status: TxStatus | string, error?: string): void {
+export function showTxStatus(status: string, error?: string): void {
   if (status === 'idle') {
     txStatusUntil = 0
     return
   }
   if (status === 'confirmed') {
-    txStatusText = TX_STATUS_MESSAGES['confirmed']
+    txStatusText = '✅ Transaction confirmed!'
     txStatusColor = Color4.create(0.3, 1, 0.3, 1)
     txStatusUntil = Date.now() + 3000
     return
   }
   if (status === 'error') {
-    txStatusText = TX_STATUS_MESSAGES['error'] + (error ? ': ' + error.slice(0, 60) : '')
+    txStatusText = '❌ ' + (error || 'Transaction failed')
     txStatusColor = Color4.create(1, 0.3, 0.3, 1)
     txStatusUntil = Date.now() + 5000
     return
   }
-  txStatusText = TX_STATUS_MESSAGES[status] || status
+  // In-progress status
+  txStatusText = status
   txStatusColor = Color4.create(1, 0.85, 0.3, 1)
-  txStatusUntil = Date.now() + 30000
+  txStatusUntil = Date.now() + 120000 // long timeout for pending txs
 }
 
 // ═══════════════════════════════════════════
@@ -282,7 +311,6 @@ export function showPickupNotification(pickerName: string, itemName: string, rar
   notificationUntil = Date.now() + NOTIFICATION_DURATION_MS
 }
 
-// Import here to avoid circular — rarityColor is only used in the notification helper above
 import { rarityColor } from './colors'
 
 // ═══════════════════════════════════════════

@@ -2,60 +2,45 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 /**
  * @title LootDropEscrow
- * @notice Holds ERC-721 NFTs (DCL wearables) while they're "dropped" in-world.
- *         Dropper deposits → item appears in scene → picker claims → NFT transfers to picker.
- *         Dropper can withdraw if nobody has claimed yet.
+ * @notice Holds DCL wearable NFTs (ERC-721) in escrow for the LootDrop game.
+ *
+ *   DROP:   Player approves this contract, then calls deposit(collection, tokenId).
+ *           The NFT transfers here. Returns a dropId.
+ *
+ *   PICKUP: Another player calls claim(dropId). The NFT transfers to them.
+ *
+ *   CANCEL: The original dropper calls withdraw(dropId) to get it back
+ *           (only if nobody has claimed it yet).
+ *
+ * Deploy on Polygon PoS (DCL wearables live there).
+ * No admin keys, no fees, no upgradability — pure escrow.
  */
-contract LootDropEscrow is ReentrancyGuard {
+contract LootDropEscrow is IERC721Receiver {
 
     struct Drop {
-        address collection;     // ERC-721 contract address
-        uint256 tokenId;        // Token ID within that collection
-        address dropper;        // Who deposited it
-        bool active;            // Still available for pickup
+        address collection;
+        uint256 tokenId;
+        address dropper;
+        bool    active;
     }
 
     uint256 public nextDropId;
-    mapping(uint256 => Drop) public drops;
+    mapping(uint256 => Drop) private drops;
 
-    // Owner (deployer) — only used for emergency pause, not custody
-    address public owner;
-    bool public paused;
-
-    // ── Events ──
     event ItemDeposited(uint256 indexed dropId, address indexed collection, uint256 tokenId, address indexed dropper);
     event ItemClaimed(uint256 indexed dropId, address indexed picker);
     event ItemWithdrawn(uint256 indexed dropId, address indexed dropper);
 
-    modifier whenNotPaused() {
-        require(!paused, "Contract is paused");
-        _;
-    }
-
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
-        _;
-    }
-
-    constructor() {
-        owner = msg.sender;
-    }
-
-    /**
-     * @notice Deposit an ERC-721 token into escrow. Caller must have approved this contract first.
-     * @param collection The ERC-721 contract address
-     * @param tokenId The token ID to deposit
-     * @return dropId The ID assigned to this drop (used by the scene to track it)
-     */
-    function deposit(address collection, uint256 tokenId) external whenNotPaused nonReentrant returns (uint256 dropId) {
+    /// @notice Deposit an ERC-721 NFT into escrow. Caller must have approved this contract first.
+    /// @param collection The NFT contract address (DCL wearable collection).
+    /// @param tokenId    The specific token ID to escrow.
+    /// @return dropId    The ID assigned to this drop.
+    function deposit(address collection, uint256 tokenId) external returns (uint256 dropId) {
         require(collection != address(0), "Invalid collection");
-
-        // Transfer NFT from caller to this contract
-        IERC721(collection).transferFrom(msg.sender, address(this), tokenId);
 
         dropId = nextDropId++;
         drops[dropId] = Drop({
@@ -65,14 +50,15 @@ contract LootDropEscrow is ReentrancyGuard {
             active: true
         });
 
+        // Transfer NFT from caller to this contract
+        IERC721(collection).transferFrom(msg.sender, address(this), tokenId);
+
         emit ItemDeposited(dropId, collection, tokenId, msg.sender);
     }
 
-    /**
-     * @notice Claim a dropped item. NFT transfers to the caller. Anyone can claim.
-     * @param dropId The drop to claim
-     */
-    function claim(uint256 dropId) external whenNotPaused nonReentrant {
+    /// @notice Claim a dropped item. The NFT transfers to the caller.
+    /// @param dropId The drop to claim.
+    function claim(uint256 dropId) external {
         Drop storage d = drops[dropId];
         require(d.active, "Drop not active");
 
@@ -84,11 +70,9 @@ contract LootDropEscrow is ReentrancyGuard {
         emit ItemClaimed(dropId, msg.sender);
     }
 
-    /**
-     * @notice Dropper reclaims their item if nobody has picked it up yet.
-     * @param dropId The drop to withdraw
-     */
-    function withdraw(uint256 dropId) external nonReentrant {
+    /// @notice Cancel a drop and reclaim the NFT. Only the original dropper can call this.
+    /// @param dropId The drop to withdraw.
+    function withdraw(uint256 dropId) external {
         Drop storage d = drops[dropId];
         require(d.active, "Drop not active");
         require(d.dropper == msg.sender, "Not the dropper");
@@ -101,24 +85,19 @@ contract LootDropEscrow is ReentrancyGuard {
         emit ItemWithdrawn(dropId, msg.sender);
     }
 
-    /**
-     * @notice Read drop info.
-     */
+    /// @notice Read drop details.
     function getDrop(uint256 dropId) external view returns (
-        address collection, uint256 tokenId, address dropper, bool active
+        address collection,
+        uint256 tokenId,
+        address dropper,
+        bool    active
     ) {
         Drop storage d = drops[dropId];
         return (d.collection, d.tokenId, d.dropper, d.active);
     }
 
-    // ── Admin ──
-
-    function setPaused(bool _paused) external onlyOwner {
-        paused = _paused;
-    }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Invalid owner");
-        owner = newOwner;
+    /// @notice Required to receive ERC-721 tokens via safeTransferFrom.
+    function onERC721Received(address, address, uint256, bytes calldata) external pure override returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
     }
 }
