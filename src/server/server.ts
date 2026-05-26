@@ -263,7 +263,7 @@ function finalizePickup(item: DroppedItem, pickerId: string): void {
   room.send('itemPickedUp', {
     id: item.id,
     pickerId,
-    pickerName: pickerId.slice(0, 8),
+    pickerName: pickerId,
     itemName: item.name,
     rarity: item.rarity,
     urn: item.urn,

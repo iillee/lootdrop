@@ -33,10 +33,16 @@
     }
   ],
   "authoritativeMultiplayer": true,
-  "requiredPermissions": [],
+  "requiredPermissions": [
+    "ALLOW_MEDIA_HOSTNAMES"
+  ],
+  "allowedMediaHostnames": [
+    "YOUR-RELAY-URL.railway.app"
+  ],
   "featureToggles": {
     "voiceChat": "enabled",
-    "portableExperiences": "enabled"
+    "portableExperiences": "enabled",
+    "nearbyVoiceChat": "enabled"
   },
   "worldConfiguration": {
     "name": "lootdrop.dcl.eth"
@@ -45,5 +51,12 @@
     "origin": "creator-hub",
     "projectId": "d22871a6-c99c-4288-9120-5bbe4e34a2ab"
   },
-  "opendcl": true
+  "opendcl": true,
+  "creator": "",
+  "contact": {
+    "name": "",
+    "email": ""
+  },
+  "tags": [],
+  "skyboxConfig": {}
 }

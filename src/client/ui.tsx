@@ -36,15 +36,20 @@ const LootDropUI = () => {
       {!showInventory && (
         <UiEntity uiTransform={{
           positionType: 'absolute',
-          position: { bottom: SLOT_SIZE + 30, right: 20 },
-          width: 120, height: 32,
-          borderRadius: 10,
+          position: { top: 40 },
+          width: '100%', height: 32,
           justifyContent: 'center', alignItems: 'center',
-        }}
-        uiBackground={{ color: Color4.create(0.1, 0.1, 0.14, 0.88) }}
-        onMouseDown={toggleInventory}
-        >
-          <Label value="🎒 INVENTORY" fontSize={12} color={Color4.create(0.75, 0.75, 0.85, 1)} textAlign="middle-center" uiTransform={{ width: 120, height: 32 }} />
+        }}>
+          <UiEntity uiTransform={{
+            width: 120, height: 32,
+            borderRadius: 10,
+            justifyContent: 'center', alignItems: 'center',
+          }}
+          uiBackground={{ color: Color4.create(0.85, 0.2, 0.2, 1) }}
+          onMouseDown={toggleInventory}
+          >
+            <Label value="INVENTORY" fontSize={12} color={Color4.White()} textAlign="middle-center" uiTransform={{ width: 120, height: 32 }} />
+          </UiEntity>
         </UiEntity>
       )}
 

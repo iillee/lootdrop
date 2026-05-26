@@ -1,23 +1,17 @@
 /**
- * blockchain.ts — Real Polygon escrow interaction for LootDrop.
+ * blockchain.ts — Relay-based Polygon escrow interaction for LootDrop.
  *
- * DROP:   approve(collection, tokenId) → deposit(collection, tokenId) → dropId
- * PICKUP: claim(dropId) → NFT transfers to caller
+ * Instead of submitting transactions directly from the player's wallet,
+ * we send signed requests to the relay server which submits them via a hot wallet.
  *
- * Requires the player's wallet on Polygon PoS network.
+ * DROP:   signedFetch → relay /drop → depositFor(owner, collection, tokenId)
+ * PICKUP: signedFetch → relay /claim → claimFor(picker, dropId)
  */
 
-import { createEthereumProvider } from '@dcl/sdk/ethereum-provider'
-import { RequestManager, ContractFactory } from 'eth-connect'
-import { getPlayer } from '@dcl/sdk/src/players'
-import { ESCROW_ADDRESS } from '../shared/contracts'
-import { ESCROW_ABI, ERC721_APPROVE_ABI } from '../shared/escrowAbi'
+import { signedFetch } from '~system/SignedFetch'
+import { RELAY_URL } from '../shared/contracts'
 
-// ── State ──
-
-let requestManager: RequestManager | null = null
-let escrowContract: any = null
-let playerAddress = ''
+// ── Status tracking ──
 
 export type TxStatus = 'idle' | 'approving' | 'depositing' | 'claiming' | 'confirmed' | 'error'
 let currentStatus: TxStatus = 'idle'
@@ -26,31 +20,6 @@ let currentError = ''
 export function getTxStatus(): TxStatus { return currentStatus }
 export function getTxError(): string { return currentError }
 export function resetTxStatus(): void { currentStatus = 'idle'; currentError = '' }
-
-// ── Init ──
-
-async function ensureProvider(): Promise<RequestManager> {
-  if (requestManager) return requestManager
-  const provider = createEthereumProvider()
-  requestManager = new RequestManager(provider)
-  const player = getPlayer()
-  playerAddress = player?.userId || ''
-  return requestManager
-}
-
-async function getEscrowContract(): Promise<any> {
-  if (escrowContract) return escrowContract
-  const rm = await ensureProvider()
-  const factory = new ContractFactory(rm, ESCROW_ABI)
-  escrowContract = await factory.at(ESCROW_ADDRESS)
-  return escrowContract
-}
-
-async function getErc721Contract(collectionAddress: string): Promise<any> {
-  const rm = await ensureProvider()
-  const factory = new ContractFactory(rm, ERC721_APPROVE_ABI)
-  return factory.at(collectionAddress)
-}
 
 // ── URN Parsing ──
 
@@ -68,7 +37,7 @@ export function parseWearableUrn(urn: string): ParsedUrn | null {
   return null
 }
 
-// ── Drop: Approve + Deposit ──
+// ── Drop: Relay depositFor ──
 
 export interface DropResult {
   success: boolean
@@ -77,66 +46,57 @@ export interface DropResult {
 }
 
 /**
- * Approve the escrow contract to transfer the NFT, then deposit it.
- * The player will be prompted to sign two transactions.
+ * Send the drop request to the relay server via signedFetch.
+ * The relay calls escrow.depositFor(playerAddress, collection, tokenId).
  *
- * @returns The on-chain dropId on success.
+ * NOTE: The player must have approved the escrow contract for this token
+ * beforehand via the approval page.
  */
 export async function approveAndDeposit(collection: string, tokenId: string): Promise<DropResult> {
   try {
-    await ensureProvider()
-    if (!playerAddress) {
-      return { success: false, dropId: -1, error: 'No wallet connected' }
-    }
-
-    const gasPrice = await requestManager!.eth_gasPrice()
-    const txOpts = { from: playerAddress, gas: 200000, gasPrice }
-
-    // Step 1: Check if already approved
-    currentStatus = 'approving'
-    console.log('[Blockchain] Checking approval for token', tokenId, 'on', collection)
-
-    const erc721 = await getErc721Contract(collection)
-    const approved: string = await erc721.getApproved(tokenId)
-
-    if (approved.toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) {
-      console.log('[Blockchain] Requesting approval...')
-      const approveTx = await erc721.approve(ESCROW_ADDRESS, tokenId, txOpts)
-      console.log('[Blockchain] Approve tx:', approveTx)
-
-      // Wait a moment for the approval to propagate
-      await delay(3000)
-    } else {
-      console.log('[Blockchain] Already approved')
-    }
-
-    // Step 2: Deposit into escrow
     currentStatus = 'depositing'
-    console.log('[Blockchain] Depositing token', tokenId, 'from collection', collection)
+    console.log('[Blockchain] Sending drop to relay:', collection, tokenId)
 
-    const escrow = await getEscrowContract()
-    const depositTx = await escrow.deposit(collection, tokenId, txOpts)
-    console.log('[Blockchain] Deposit tx:', depositTx)
+    const res = await signedFetch({
+      url: `${RELAY_URL}/drop`,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collection, tokenId })
+      }
+    })
 
-    // Read the dropId from the contract (nextDropId - 1)
-    // Since we just deposited, the latest dropId is nextDropId - 1
-    await delay(5000) // wait for tx confirmation
-    const nextId: string = await escrow.nextDropId()
-    const dropId = parseInt(nextId) - 1
+    if (!res.ok) {
+      const body = res.body ? JSON.parse(res.body) : { error: 'Unknown error' }
+      const errMsg = body.error || `Relay returned ${res.status}`
 
-    console.log('[Blockchain] ✅ Deposited! dropId =', dropId)
+      // If the NFT isn't approved, give a helpful message
+      if (errMsg.includes('not approved') || errMsg.includes('approval')) {
+        currentStatus = 'error'
+        currentError = 'NFT not approved — visit the approval page first'
+        return { success: false, dropId: -1, error: currentError }
+      }
+
+      currentStatus = 'error'
+      currentError = errMsg
+      return { success: false, dropId: -1, error: errMsg }
+    }
+
+    const data = JSON.parse(res.body)
+    console.log('[Blockchain] ✅ Relay drop success! dropId:', data.dropId, 'tx:', data.txHash)
+
     currentStatus = 'confirmed'
-    return { success: true, dropId }
+    return { success: true, dropId: data.dropId }
 
   } catch (err: any) {
-    console.error('[Blockchain] Drop failed:', err)
+    console.error('[Blockchain] Drop relay failed:', err)
     currentStatus = 'error'
-    currentError = err.message || 'Transaction failed'
+    currentError = err.message || 'Relay request failed'
     return { success: false, dropId: -1, error: currentError }
   }
 }
 
-// ── Pickup: Claim ──
+// ── Pickup: Relay claimFor ──
 
 export interface ClaimResult {
   success: boolean
@@ -145,55 +105,48 @@ export interface ClaimResult {
 }
 
 /**
- * Claim a dropped item from the escrow contract.
- * The NFT transfers to the caller.
+ * Send the claim request to the relay server via signedFetch.
+ * The relay calls escrow.claimFor(playerAddress, dropId).
  */
 export async function claimDrop(dropId: number): Promise<ClaimResult> {
   try {
-    await ensureProvider()
-    if (!playerAddress) {
-      return { success: false, txHash: '', error: 'No wallet connected' }
-    }
-
     currentStatus = 'claiming'
-    console.log('[Blockchain] Claiming dropId', dropId)
+    console.log('[Blockchain] Sending claim to relay, dropId:', dropId)
 
-    const gasPrice = await requestManager!.eth_gasPrice()
-    const escrow = await getEscrowContract()
-    const txHash = await escrow.claim(dropId, {
-      from: playerAddress,
-      gas: 200000,
-      gasPrice
+    const res = await signedFetch({
+      url: `${RELAY_URL}/claim`,
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dropId })
+      }
     })
 
-    console.log('[Blockchain] ✅ Claimed! tx:', txHash)
+    if (!res.ok) {
+      const body = res.body ? JSON.parse(res.body) : { error: 'Unknown error' }
+      currentStatus = 'error'
+      currentError = body.error || `Relay returned ${res.status}`
+      return { success: false, txHash: '', error: currentError }
+    }
+
+    const data = JSON.parse(res.body)
+    console.log('[Blockchain] ✅ Relay claim success! tx:', data.txHash)
+
     currentStatus = 'confirmed'
-    return { success: true, txHash }
+    return { success: true, txHash: data.txHash }
 
   } catch (err: any) {
-    console.error('[Blockchain] Claim failed:', err)
+    console.error('[Blockchain] Claim relay failed:', err)
     currentStatus = 'error'
-    currentError = err.message || 'Transaction failed'
+    currentError = err.message || 'Relay request failed'
     return { success: false, txHash: '', error: currentError }
   }
 }
 
-// ── Helpers ──
+// ── Network check (no longer needed but kept for API compat) ──
 
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-/**
- * Check if the player is on Polygon network.
- */
 export async function checkNetwork(): Promise<boolean> {
-  try {
-    const rm = await ensureProvider()
-    const chainId = await (rm as any).net_version()
-    // Polygon PoS mainnet = 137
-    return chainId === '137' || chainId === 137
-  } catch {
-    return false
-  }
+  // With the relay, the player doesn't submit transactions directly,
+  // so we don't need to check their network. Always return true.
+  return true
 }

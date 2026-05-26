@@ -44,15 +44,7 @@ export const MOCK_ITEMS: { name: string; rarity: Rarity }[] = [
   { name: 'Legendary Sword', rarity: 'legendary' },
 ]
 
-/** Map rarity to card model. Falls back to common for missing rarities. */
-export const RARITY_MODELS: Record<string, string> = {
-  common: 'models/rarity-bg-common.glb',
-  uncommon: 'models/rarity-bg-common.glb',   // TODO: download uncommon model
-  rare: 'models/rarity-bg-rare.glb',
-  epic: 'models/rarity-bg-rare.glb',          // TODO: download epic model
-  legendary: 'models/rarity-bg-legendary.glb',
-  mythic: 'models/rarity-bg-legendary.glb',   // TODO: download mythic model
-  unique: 'models/rarity-bg-legendary.glb',   // TODO: download unique model
-}
+/** Card model used for all dropped items. */
+export const CARD_MODEL = 'models/rarity-bg-common.glb'
 
 export const MAX_DROPPED_ITEMS = 30

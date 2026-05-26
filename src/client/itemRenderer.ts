@@ -5,6 +5,7 @@ import {
   GltfContainer,
   Material,
   MeshRenderer,
+  MeshCollider,
   ColliderLayer,
   Entity,
   pointerEventsSystem,
@@ -12,20 +13,9 @@ import {
 } from '@dcl/sdk/ecs'
 import { Vector3, Quaternion, Color4 } from '@dcl/sdk/math'
 import { isStateSyncronized } from '@dcl/sdk/network'
-import { Rarity, RARITY_MODELS } from '../shared/items'
+import { Rarity, CARD_MODEL } from '../shared/items'
 import { room } from '../shared/messages'
-
-// ── Rarity visual config ──
-
-const RARITY_TEXT_COLOR: Record<string, Color4> = {
-  common: Color4.create(0.95, 0.95, 0.95, 1),
-  uncommon: Color4.create(0.95, 0.95, 0.95, 1),
-  rare: Color4.create(1, 1, 1, 1),
-  epic: Color4.create(1, 1, 1, 1),
-  legendary: Color4.create(1, 1, 1, 1),
-  mythic: Color4.create(1, 1, 1, 1),
-  unique: Color4.create(1, 1, 1, 1),
-}
+import { rarityColor } from './ui/colors'
 
 // ── Active item tracking ──
 
@@ -51,32 +41,17 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
     scale: Vector3.create(1.6, 1.6, 1.6)
   })
   GltfContainer.create(entity, {
-    src: RARITY_MODELS[rarity] || RARITY_MODELS.common,
+    src: CARD_MODEL,
     visibleMeshesCollisionMask: ColliderLayer.CL_POINTER
   })
 
-  // Front label
-  const labelFront = engine.addEntity()
-  Transform.create(labelFront, {
-    position: Vector3.create(0, 0.08, 0.01),
-    parent: entity
-  })
-  TextShape.create(labelFront, {
-    text: name + '\n' + rarity.toUpperCase(),
-    fontSize: 1.2,
-    textColor: RARITY_TEXT_COLOR[rarity] || RARITY_TEXT_COLOR.common,
-    outlineColor: Color4.create(0, 0, 0, 1),
-    outlineWidth: 0.2,
-    width: 0.8
-  })
-
-  // Thumbnail image plane (if available)
+  // Thumbnail image plane — upper portion of card
   let thumbEntity: Entity | null = null
   if (thumbnail) {
     thumbEntity = engine.addEntity()
     Transform.create(thumbEntity, {
-      position: Vector3.create(0, 0.08, 0.005),
-      scale: Vector3.create(0.45, 0.45, 1),
+      position: Vector3.create(0, 0.13, -0.01),
+      scale: Vector3.create(0.38, 0.38, 1),
       parent: entity
     })
     MeshRenderer.setPlane(thumbEntity)
@@ -90,6 +65,25 @@ export function spawnItemCard(id: string, name: string, rarity: Rarity, x: numbe
       metallic: 0
     })
   }
+
+  // Item name — below thumbnail (or centered if no thumbnail)
+  const labelFront = engine.addEntity()
+  Transform.create(labelFront, {
+    position: Vector3.create(0, thumbnail ? -0.22 : 0.0, -0.01),
+    parent: entity
+  })
+
+  // Truncate long names
+  const displayName = name.length > 20 ? name.slice(0, 18) + '…' : name
+
+  TextShape.create(labelFront, {
+    text: displayName + '\n' + rarity.toUpperCase(),
+    fontSize: 0.8,
+    textColor: Color4.White(),
+    outlineColor: Color4.create(0, 0, 0, 1),
+    outlineWidth: 0.15,
+    width: 0.9
+  })
 
   // Pointer event — pick up on E press or left-click
   pointerEventsSystem.onPointerDown(

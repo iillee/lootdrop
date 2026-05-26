@@ -1,168 +1,184 @@
-# LootDrop: The Engineering Case
+# LootDrop — Engineering Document
 
-## What I'm Building and Why It Matters
-
-I'm an engineer building a system that lets players drop NFTs as physical objects in Decentraland's 3D world. Pick them up. Trade them face-to-face. Leave them for strangers. The prototype already works — authoritative server, persistent storage, real wearable data from the player's wallet, spatial pickup with server-side validation.
-
-But here's the thing: I've hit the ceiling of what a single scene can do. And the features that would make this transformative — the ones that would fundamentally change how Decentraland's economy works — require platform-level changes that no scene developer can implement alone.
-
-This document is about what those changes are, why they're worth doing, and who should build them.
+This is the technical companion to the [forum post](LINK). It covers what's been built, how it works, and what platform-level changes would be needed to scale this beyond a single scene.
 
 ---
 
-## What Exists Today (Scene-Level)
+## Architecture Overview
 
-The current prototype runs as an SDK7 authoritative server scene on a 2×2 parcel:
+```
+┌─────────────────────────────────────────────────────────┐
+│                   DECENTRALAND CLIENT                   │
+│                                                         │
+│  Inventory UI ─── fetches wearables from Catalyst API   │
+│       │           + resolves tokenIds via Polygon        │
+│       │             subgraph                             │
+│       ▼                                                  │
+│  Hotbar / Grid ── select item ── confirm drop            │
+│       │                              │                   │
+│       │                    signedFetch to Relay           │
+│       │                              │                   │
+│       ▼                              ▼                   │
+│  Item Renderer              Relay Server (Node.js)       │
+│  (3D cards, bob+spin,       │  verifies DCL auth chain   │
+│   rarity glow, thumbnails)  │  submits Polygon tx        │
+│       ▲                     │  via hot wallet             │
+│       │                              │                   │
+│       │                              ▼                   │
+│  Auth Server ◄──────── Escrow Contract (Polygon)         │
+│  (SDK7 server runtime)     depositFor / claimFor         │
+│  • validates proximity                                   │
+│  • manages reservations                                  │
+│  • persists items (Storage API)                          │
+│  • syncs state to all clients                            │
+└─────────────────────────────────────────────────────────┘
+```
 
-- **Drop mechanic** — Player clicks "Drop," selects a wearable from their actual wallet inventory (fetched from the catalyst API), and it appears as a 3D card at their feet. Rarity-coded visuals — common through legendary.
-- **Pickup mechanic** — Walk within 3 meters, press E. Server validates proximity using `PlayerIdentityData` + `Transform` (no client-reported positions — anti-cheat by default). First-come-first-served for simultaneous requests.
-- **Persistence** — Server writes item state to the Storage API. Items survive scene restarts and player disconnections. When you connect, you get a full sync of everything currently on the ground.
-- **Real wallet data** — The drop UI shows your actual owned DCL wearables, pulled from `peer.decentraland.org/lambdas/collections/wearables-by-owner/`. Names, rarities, URNs — all real.
-
-What it *doesn't* do yet: actual on-chain transfers. When you "drop" a wearable, it's recorded server-side, but no token moves on Polygon. That's the next step, and it's where things get interesting.
-
----
-
-## The Broad Engineering Roadmap
-
-### Step 1: On-Chain Item Escrow (Scene-Level, No Platform Changes)
-
-A simple ERC-721 escrow contract on Polygon. When you drop a wearable:
-1. Client prompts you to `approve` the escrow contract for that token
-2. Client calls `deposit(tokenId, parcelId)` — token transfers to escrow
-3. Server records the drop with the on-chain transaction hash
-4. When someone picks up: escrow calls `safeTransferFrom` to the picker's address
-5. Picker pays gas (near-zero on Polygon)
-
-This is buildable today with `eth-connect` and `createEthereumProvider` in SDK7. The signer UX is clunky (MetaMask popups), but it works. The magic moment — "I dropped a real NFT and someone else actually received it" — is achievable without any platform support.
-
-**Risk:** Gas UX. Even on Polygon, prompting a transaction signature for every drop/pickup adds friction. Ideally, the platform would support session-based signing or gasless meta-transactions. That's a platform ask.
-
-### Step 2: Parcel Wallet Contracts (Needs Platform Awareness)
-
-Every parcel (or estate) gets an associated smart contract that can custody items. This is where LAND transforms from a coordinate into an economic actor.
-
-The contract logic:
-- `setPolicy(parcelId, policy)` — landowner configures: open, whitelist, fee-required, closed
-- `drop(parcelId, tokenId)` — deposit an item into the parcel's custody
-- `pickup(parcelId, tokenId)` — claim an item (subject to policy + reputation tier)
-- `recall(parcelId, tokenId)` — dropper reclaims their item
-- `decay(parcelId)` — time-based auto-return of unclaimed items
-
-**What this needs from the platform:**
-- A registry contract mapping parcel coordinates → wallet addresses. This could be a new contract deployed by the Foundation, or an extension to the existing LAND/Estate contracts.
-- The explorer client needs to query parcel wallets and render dropped items. Right now, each scene handles its own rendering. At platform scale, the client should natively understand "this parcel has 12 items on the ground" and render them without requiring a custom scene.
-
-### Step 3: Spatial Item Rendering Standard (Platform-Level)
-
-For items to exist across the entire world — not just inside one scene — the explorer needs a rendering standard:
-
-- **Wearables with 3D models** → render the model directly (most wearables already have GLBs)
-- **2D NFTs** → render in a frame (NftShape already does this, just needs to work spatially)
-- **Fungible tokens** → render as a pouch/stack with quantity label
-- **Unknown NFTs** → render as a generic glowing orb with metadata tooltip
-
-This is a client-side feature. The explorer already renders wearables on avatars — extending this to render them as ground objects is a natural evolution, not a paradigm shift.
-
-### Step 4: Reputation System (Hybrid On-Chain/Off-Chain)
-
-Open-world item interaction without trust gates would be instantly exploited. Bots would snipe every drop. Griefers would flood parcels with junk.
-
-The reputation system is a soulbound score built from:
-- **On-chain signals:** Account age, LAND/NAME ownership, DAO voting history, marketplace trade history, badge holdings
-- **Off-chain signals:** Time spent in-world (from catalyst/comms data), active social connections, scene visit diversity
-
-Implementation options:
-1. **Attestation-based** (EAS or similar) — off-chain computation, on-chain attestations. Cheapest. Most flexible.
-2. **Soulbound token** — a non-transferable ERC-721 with mutable metadata. More visible on-chain but higher gas cost to update.
-3. **Hybrid** — off-chain score computation with periodic on-chain checkpoints. The scene/client queries an API for the score but can verify against on-chain roots.
-
-**Tiered access (enforced by the escrow/parcel-wallet contracts):**
-- Tier 0 (new accounts): Can see items. Can't interact.
-- Tier 1 (established): Can receive gifts and participate in trades.
-- Tier 2 (trusted): Can pick up public drops.
-- Tier 3 (veteran): Can drop items on public parcels.
-
-This fights both bot sniping and griefing without KYC or centralized approval.
-
-### Step 5: P2P Trading Protocol (Scene + Platform)
-
-Face-to-face trading is the social endgame. Two players standing near each other:
-1. Player A initiates trade (proximity-triggered, like the pickup mechanic)
-2. Both players see a spatial trade surface between them
-3. Each drags items onto their side
-4. Both confirm → escrow contract executes atomic swap
-5. Items visually transfer across the surface
-
-The escrow contract for this is a standard 2-of-2 multi-sig pattern — both parties deposit, both confirm, swap executes. The hard part isn't the contract; it's the **UX of signing multiple transactions in a 3D environment** without breaking immersion.
-
-**Platform ask:** Session keys or embedded wallet support. If every trade requires 2-3 MetaMask popups per player, the experience dies. This is arguably the single most impactful platform improvement for enabling in-world economies.
+**Stack:** SDK7 authoritative server scene on a 2×2 parcel. Solidity escrow contract on Polygon. Node.js relay server for gasless transactions. No new tokens, no new chains.
 
 ---
 
-## What This Does to Decentraland's Economy
+## What's Built
 
-### LAND Becomes Productive
+### Authoritative Server (`src/server/server.ts`)
 
-Right now, LAND value is speculative — based on location and adjacency, with no revenue-generating mechanism beyond hosting events. Parcel wallets make LAND economically active:
+The server is the source of truth. It handles:
 
-- High-traffic parcels earn fees from item drops (landowner-set)
-- Strategic locations become natural marketplaces
-- Parcels compete on policies — some are open bazaars, some are curated galleries, some are invite-only vaults
-- LAND rental becomes more valuable because renters get the economic activity of the parcel
+- **Drops** — Reads the player's real position via `PlayerIdentityData` + `Transform`. Places the item at their feet. Validates name, rarity, and for real items, requires a valid on-chain `dropId` from the escrow contract. Broadcasts to all clients.
+- **Pickups** — Server-side proximity check (3m horizontal distance). No client-reported positions, so anti-cheat is built in. For mock items, instant pickup. For real items, a reservation system: the item is held for 90 seconds while the player completes the on-chain claim via the relay.
+- **Persistence** — All items written to the Storage API as a JSON blob. Survives scene restarts and player disconnections. Includes v1→v2 migration logic.
+- **Player sync** — New players get a full sync of all items on connect, plus a list of URNs they've already dropped (filtered from their inventory UI).
+- **30 item cap** enforced server-side.
 
-### Wearables Get a Second Life
+### Escrow Contract (`contracts/LootDropEscrowV2.sol`)
 
-The current wearable economy is mint → wear → maybe sell on marketplace. LootDrop adds: gift, hide, trade in-person, leave as loot, use as game prizes. Every wearable becomes a potential game piece, gift, or social signal. Trading volume increases because trading is *fun* — it happens in a 3D space with another person, not on a web page.
+Deployed on Polygon at `0xa90e7d45c7e8e0c82b4c480ad017cad35be0051e`.
 
-### Engagement Loops That Don't Require Events
+```
+depositFor(owner, collection, tokenId) → dropId    [relay only]
+claimFor(picker, dropId)                            [relay only]
+deposit(collection, tokenId) → dropId               [direct]
+claim(dropId)                                        [direct]
+withdraw(dropId)                                     [dropper only]
+getDrop(dropId) → (collection, tokenId, dropper, active)
+```
 
-Decentraland's current engagement model is event-driven. No event, no reason to log in. LootDrop creates passive engagement: "I wonder if anyone dropped something interesting near the plaza." Scavenger hunts, dead drops, street markets — these happen without anyone organizing them. They emerge from the system.
+The relay pattern: a trusted hot wallet submits transactions on behalf of players so they never pay gas or see MetaMask popups inside the scene. The contract enforces that only the relay address can call `depositFor`/`claimFor`. Security relies on the relay verifying DCL `signedFetch` auth chains before submitting anything.
+
+**Prerequisite:** Players must approve the escrow contract (not the relay) to transfer their NFTs. This is a one-time `approve()` or `setApprovalForAll()` call per collection, done on an external approval page.
+
+### Relay Server (`relay/server.js`)
+
+Node.js + Express. Three endpoints:
+
+- `POST /drop` — Verifies DCL auth headers via `@dcl/crypto`, calls `escrow.depositFor()`, returns `{ dropId, txHash }`.
+- `POST /claim` — Verifies auth, checks drop is still active, calls `escrow.claimFor()`, returns `{ txHash }`.
+- `GET /health` — Relay wallet balance and status.
+
+Rate limited (1 action per player per 10 seconds). Auth verification uses the same `Authenticator.validateSignature` pattern from the DCL crypto library — every request is cryptographically signed by the player's in-world session.
+
+### Client
+
+- **Inventory** (`src/client/inventory.ts`) — Fetches the player's real DCL wearables from the Catalyst API (`/lambdas/collections/wearables-by-owner/`), batch-fetches metadata (names, rarities, thumbnails) from the content API, and resolves `tokenId` + `contractAddress` from the Polygon collections subgraph. Falls back to mock items for guests or fetch failures.
+- **UI** (`src/client/ui/`) — Hotbar (10 slots) + scrollable inventory grid. Two-click swap system. Drop confirmation modal with blockchain status. Pickup notifications. Transaction status overlay.
+- **Item Renderer** (`src/client/itemRenderer.ts`) — Dropped items appear as rarity-coded 3D cards (GLB models) with thumbnail textures, text labels, bob+spin animation, and pointer events for pickup.
+- **Blockchain** (`src/client/blockchain.ts`) — `signedFetch` calls to the relay for both drops and claims. Status tracking for UI feedback.
+
+### Message Protocol (`src/shared/messages.ts`)
+
+```
+Client → Server:
+  requestDrop     { name, rarity, urn, thumbnail, dropId, collection, tokenId }
+  requestPickup   { itemId }
+  confirmPickup   { itemId, txHash }
+
+Server → Client:
+  itemDropped     { id, name, rarity, thumbnail, x, y, z, dropperId, dropId }
+  itemPickedUp    { id, pickerId, pickerName, itemName, rarity, urn, thumbnail, dropId, collection, tokenId }
+  approvePickup   { itemId, dropId, itemName, rarity }
+  syncAll         { itemsJson }
+  droppedUrns     { urnsJson }
+  error           { message }
+```
 
 ---
 
-## Who Should Build This
+## Current Status
 
-### What Scene Developers Can Do (Today)
-- The escrow contract (Phase 1)
-- Single-scene prototypes (what we're building now)
-- The trade UI
-- Community testing and iteration
+### Working
+- Full authoritative server drop/pickup/sync lifecycle
+- Escrow contract deployed on Polygon
+- Relay server code complete with auth verification
+- Client inventory fetching real wallet data + subgraph tokenId resolution
+- Hotbar/inventory UI with drag-swap and drop confirmation
+- 3D item rendering with rarity cards, thumbnails, animations
+- Server-side persistence across restarts
+- Reservation system for async on-chain claims
 
-### What Requires the Foundation
-- **Parcel wallet registry** — linking parcel coordinates to custody contracts
-- **Explorer-level item rendering** — so items exist across the world, not per-scene
-- **Session key / embedded wallet support** — so signing transactions doesn't break immersion
-- **Reputation data pipeline** — aggregating on-chain and off-chain signals into a queryable score
-
-### What the DAO Should Fund
-- Smart contract audits for the escrow and parcel wallet systems
-- The reputation system design and implementation
-- A formal protocol specification so this becomes an open standard
-- Grants for scene developers to integrate drop/pickup/trade into existing experiences
-
-### Foundation vs. DAO: Who Leads?
-
-The Foundation is better positioned to build the **infrastructure** — explorer changes, contract deployments, client rendering standards. These are core protocol decisions that affect every user and need to ship with the explorer.
-
-The DAO is better positioned to fund the **ecosystem** — audits, grants, community testing, governance of the reputation system. The DAO should own the reputation parameters (what signals matter, what thresholds set the tiers) because those are political decisions, not engineering ones.
-
-The ideal split: Foundation builds the pipes, DAO governs the policies, and scene developers build the experiences on top.
+### Not Working
+- **Scene won't load** — "Engine is already sealed" error at runtime. Compiles clean. Likely a component registration ordering issue with the auth server bundle. This is the blocking bug.
+- **Relay not deployed** — `RELAY_URL` is still a placeholder. Relay code is written but needs hosting (Railway/Render) and a funded hot wallet.
+- **Approval page not built** — Players need a way to approve the escrow contract for their NFTs before dropping. Planned as a simple HTML page served from the relay.
+- **No environment/scene dressing** — Empty world. New visitors won't understand what they're looking at.
 
 ---
 
-## What I'm Asking For
+## What a Single Scene Can't Do
 
-Not funding. Not permission. The prototype is being built regardless.
+The prototype proves the mechanic works. But items only exist inside this one scene. For this to become a platform feature, several things need to happen at the explorer/protocol level:
 
-What I'm asking for is **awareness** — that this direction is possible, that the infrastructure needed is specific and achievable, and that if it works, it should become part of the platform rather than remaining a clever hack in a single scene.
+### 1. Parcel Wallet Registry
 
-The pieces are all there. SDK7's authoritative servers handle the game logic. CRDT sync handles multiplayer state. The catalyst API provides wallet data. Polygon provides near-zero gas for transfers. The LAND contracts provide ownership. The marketplace contracts provide trade history.
+A contract mapping parcel coordinates to wallet addresses. Each parcel (or estate) gets an associated wallet that can custody items. Landowners configure drop policies (open, invite-only, fee-required, closed) but don't control the wallet itself — droppers retain a claim on their items.
 
-No new token. No new chain. No new protocol. Just connecting what already exists in a way that makes the world feel like a world.
+This could be a new contract deployed by the Foundation, or an extension to the existing LAND/Estate contracts. Without it, every scene developer has to build their own custody system.
 
-The hardest part isn't the engineering. It's getting the right people to see what's possible before they make decisions that go in a different direction.
+### 2. Explorer-Level Item Rendering
+
+Right now, each scene handles its own rendering. At platform scale, the explorer client should natively understand "this parcel has items on the ground" and render them without requiring a custom scene. The explorer already renders wearables on avatars — extending this to ground objects is a natural evolution.
+
+Rendering standard:
+- Wearables with 3D models → render the model directly (most already have GLBs)
+- 2D NFTs → framed display (NftShape already does this)
+- Fungible tokens → pouch/stack with quantity
+- Unknown NFTs → generic glowing orb with metadata tooltip
+
+### 3. Session Keys / Embedded Wallets
+
+If every drop and pickup requires a MetaMask popup, the experience dies. The relay pattern solves this for the prototype (players approve once, relay submits all subsequent transactions), but at platform scale, native session key support or embedded wallets would eliminate this friction for all scene developers, not just LootDrop.
+
+This is arguably the single most impactful platform improvement for enabling in-world economies.
+
+### 4. Reputation Data Pipeline
+
+Open-world item interaction without trust gates gets exploited immediately. The data for a reputation score already exists — account age, LAND/NAME ownership, DAO votes, marketplace history, badges, time in-world. What's missing is an aggregation layer that scenes and contracts can query.
+
+Implementation options: attestation-based (EAS), soulbound token with mutable metadata, or hybrid off-chain computation with on-chain checkpoints. The DAO should own the parameters (what signals matter, what thresholds set the tiers) since those are governance decisions.
 
 ---
 
-*The code is open source. The prototype is live. Come drop something on the ground and see how it feels.*
+## Roadmap
+
+| Phase | What | Status | Depends On |
+|-------|------|--------|------------|
+| **1** | Fix engine-sealed bug, get prototype loading | **Next** | Nothing |
+| **2** | Deploy relay, fund hot wallet, end-to-end on-chain drops | Blocked on Phase 1 | Relay hosting |
+| **3** | Build approval page, polish UI, add environment | Blocked on Phase 2 | Nothing |
+| **4** | P2P trading (spatial trade surface, 2-of-2 escrow) | Design phase | Phase 3 |
+| **5** | Parcel wallet contracts | Not started | Foundation |
+| **6** | Reputation system | Not started | DAO governance |
+
+Phases 1–4 are scene-level work that can be built without any platform changes. Phases 5–6 require Foundation infrastructure and DAO governance respectively.
+
+---
+
+## Links
+
+- **Escrow contract:** [0xa90e...051e on Polygonscan](https://polygonscan.com/address/0xa90e7d45c7e8e0c82b4c480ad017cad35be0051e)
+- **Source code:** [GitHub](LINK)
+- **Forum post:** [LINK]
+- **Vision document:** See `VISION.md` in the repo
+
+---
+
+*Last updated: May 2026*

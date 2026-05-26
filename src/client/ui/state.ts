@@ -9,6 +9,7 @@ import { room } from '../../shared/messages'
 import { Rarity, OwnedWearable } from '../../shared/items'
 import { getWearables, isLoading, isLoaded, fetchWearables } from '../inventory'
 import { approveAndDeposit, checkNetwork } from '../blockchain'
+import { MOCK_MODE } from '../../shared/contracts'
 import {
   HOTBAR_SLOTS, GRID_COLS, GRID_ROWS,
   DROP_COOLDOWN_MS, NOTIFICATION_DURATION_MS
@@ -179,9 +180,9 @@ export function confirmDrop(): void {
   if (now - lastDropTime < DROP_COOLDOWN_MS) return
   lastDropTime = now
 
-  // Mock items (no URN): drop immediately, no blockchain
-  if (!w.urn) {
-    console.log('[UI] Mock drop — no blockchain needed')
+  // Mock mode or mock items (no URN): drop immediately, no blockchain
+  if (!w.urn || MOCK_MODE) {
+    console.log('[UI] Mock drop — no blockchain needed', MOCK_MODE ? '(MOCK_MODE)' : '')
     pendingDropSlot = slotIdx
     room.send('requestDrop', {
       name: w.name, rarity: w.rarity, urn: '',

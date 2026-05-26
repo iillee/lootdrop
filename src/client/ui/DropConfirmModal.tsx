@@ -111,7 +111,7 @@ export const DropConfirmModal = () => {
         {!dropInProgress ? (
           <UiEntity
             uiTransform={{ width: BUTTON_WIDTH, height: 36, borderRadius: 10, justifyContent: 'center', alignItems: 'center', margin: { bottom: 8 } }}
-            uiBackground={{ color: isReal ? Color4.create(0.85, 0.5, 0.1, 1) : Color4.create(0.85, 0.2, 0.2, 1) }}
+            uiBackground={{ color: rarityColor(w.rarity) }}
             onMouseDown={() => { confirmDrop() }}
           >
             <Label

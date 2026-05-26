@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LootDrop — Approve NFT</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.1/dist/ethers.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; align-items: center; }
+    .container { max-width: 480px; width: 100%; padding: 2rem; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.5rem; color: #fff; }
+    .subtitle { color: #888; margin-bottom: 2rem; }
+    .card { background: #16161f; border: 1px solid #2a2a3a; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
+    label { display: block; color: #aaa; font-size: 0.85rem; margin-bottom: 0.3rem; }
+    input { width: 100%; padding: 0.7rem; background: #0d0d14; border: 1px solid #333; border-radius: 8px; color: #fff; font-size: 0.95rem; margin-bottom: 1rem; }
+    input:focus { outline: none; border-color: #6c5ce7; }
+    button { width: 100%; padding: 0.8rem; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    .btn-connect { background: #6c5ce7; color: #fff; }
+    .btn-connect:hover { background: #5a4bd1; }
+    .btn-approve { background: #00b894; color: #fff; }
+    .btn-approve:hover { background: #00a381; }
+    .btn-approve:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .status { margin-top: 1rem; padding: 0.8rem; border-radius: 8px; font-size: 0.9rem; }
+    .status.success { background: #00b89422; border: 1px solid #00b894; color: #00b894; }
+    .status.error { background: #d6336c22; border: 1px solid #d6336c; color: #d6336c; }
+    .status.info { background: #6c5ce722; border: 1px solid #6c5ce7; color: #a29bfe; }
+    .wallet-info { font-size: 0.85rem; color: #6c5ce7; margin-bottom: 1rem; word-break: break-all; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎒 LootDrop</h1>
+    <p class="subtitle">Approve your NFT for in-world item drops</p>
+
+    <!-- Step 1: Connect wallet -->
+    <div id="connectSection" class="card">
+      <p style="margin-bottom:1rem; color:#aaa;">Connect your wallet on <strong>Polygon</strong> to approve NFTs for LootDrop.</p>
+      <button class="btn-connect" onclick="connectWallet()">Connect Wallet</button>
+    </div>
+
+    <!-- Step 2: Approve -->
+    <div id="approveSection" class="card hidden">
+      <div class="wallet-info" id="walletDisplay"></div>
+
+      <label>NFT Collection Address</label>
+      <input type="text" id="collectionInput" placeholder="0x..." />
+
+      <label>Token ID</label>
+      <input type="text" id="tokenIdInput" placeholder="e.g. 12345" />
+
+      <button class="btn-approve" id="approveBtn" onclick="approveToken()">Approve for LootDrop</button>
+    </div>
+
+    <div id="statusBox" class="status hidden"></div>
+  </div>
+
+  <script>
+    // ESCROW_ADDRESS is fetched from the relay's /health endpoint
+    let escrowAddress = ''
+    let signer = null
+
+    async function connectWallet() {
+      try {
+        if (!window.ethereum) {
+          showStatus('error', 'MetaMask not found. Please install it.')
+          return
+        }
+
+        const provider = new ethers.BrowserProvider(window.ethereum)
+        const network = await provider.getNetwork()
+
+        // Check Polygon (chainId 137)
+        if (network.chainId !== 137n) {
+          showStatus('info', 'Please switch MetaMask to Polygon network.')
+          try {
+            await window.ethereum.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: '0x89' }]
+            })
+          } catch (e) {
+            showStatus('error', 'Could not switch to Polygon. Please switch manually.')
+            return
+          }
+        }
+
+        signer = await provider.getSigner()
+        const address = await signer.getAddress()
+
+        // Fetch escrow address from relay
+        const health = await fetch('/health').then(r => r.json())
+        escrowAddress = health.escrow
+
+        document.getElementById('connectSection').classList.add('hidden')
+        document.getElementById('approveSection').classList.remove('hidden')
+        document.getElementById('walletDisplay').textContent = `Connected: ${address}`
+        showStatus('success', `Connected on Polygon. Escrow: ${escrowAddress.slice(0, 10)}...`)
+      } catch (err) {
+        showStatus('error', 'Connection failed: ' + err.message)
+      }
+    }
+
+    async function approveToken() {
+      const collection = document.getElementById('collectionInput').value.trim()
+      const tokenId = document.getElementById('tokenIdInput').value.trim()
+
+      if (!collection || !tokenId) {
+        showStatus('error', 'Please enter both collection address and token ID.')
+        return
+      }
+
+      if (!ethers.isAddress(collection)) {
+        showStatus('error', 'Invalid collection address.')
+        return
+      }
+
+      const btn = document.getElementById('approveBtn')
+      btn.disabled = true
+      btn.textContent = 'Approving...'
+      showStatus('info', 'Please confirm the transaction in MetaMask...')
+
+      try {
+        const erc721 = new ethers.Contract(collection, [
+          'function approve(address to, uint256 tokenId) external',
+          'function getApproved(uint256 tokenId) external view returns (address)'
+        ], signer)
+
+        // Check if already approved
+        const currentApproval = await erc721.getApproved(tokenId)
+        if (currentApproval.toLowerCase() === escrowAddress.toLowerCase()) {
+          showStatus('success', '✅ Already approved! You can drop this item in-world.')
+          btn.disabled = false
+          btn.textContent = 'Approve for LootDrop'
+          return
+        }
+
+        const tx = await erc721.approve(escrowAddress, tokenId)
+        showStatus('info', `Transaction submitted: ${tx.hash.slice(0, 14)}... Waiting for confirmation...`)
+
+        await tx.wait()
+        showStatus('success', '✅ Approved! You can now drop this item in LootDrop.')
+      } catch (err) {
+        showStatus('error', 'Approval failed: ' + (err.reason || err.message))
+      } finally {
+        btn.disabled = false
+        btn.textContent = 'Approve for LootDrop'
+      }
+    }
+
+    function showStatus(type, message) {
+      const box = document.getElementById('statusBox')
+      box.className = `status ${type}`
+      box.textContent = message
+      box.classList.remove('hidden')
+    }
+  </script>
+</body>
+</html>
