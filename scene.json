@@ -37,7 +37,7 @@
     "ALLOW_MEDIA_HOSTNAMES"
   ],
   "allowedMediaHostnames": [
-    "YOUR-RELAY-URL.railway.app"
+    "lootdrop-production.up.railway.app"
   ],
   "featureToggles": {
     "voiceChat": "enabled",

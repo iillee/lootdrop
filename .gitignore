@@ -2,3 +2,5 @@ node_modules/
 bin/
 .dcl-cache/
 nul
+.env
+relay/.env
